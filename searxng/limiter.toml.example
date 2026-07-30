@@ -1,0 +1,10 @@
+# SearxNG limiter override template.
+# Leave the live file without active entries to inherit upstream defaults.
+# See https://docs.searxng.org/admin/searx.limiter.html
+
+# Example override for a public deployment:
+# [botdetection.ip_limit]
+# link_token = true
+
+# Do not expose a public instance without trusted-proxy, rate-limiting,
+# authentication/network-control, and secret-management review.

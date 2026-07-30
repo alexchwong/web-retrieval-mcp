@@ -1,0 +1,30 @@
+# Generic Compose template. Runtime overrides belong in .env.
+
+services:
+  searxng:
+    image: ${SEARXNG_IMAGE:-docker.io/searxng/searxng:latest}
+    restart: unless-stopped
+    ports:
+      - "${SEARXNG_BIND_ADDRESS:-127.0.0.1}:${SEARXNG_HOST_PORT:-8888}:8080"
+    volumes:
+      - ./searxng:/etc/searxng:ro
+    environment:
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL:-http://localhost:8888/}
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?Copy .env.example to .env and set SEARXNG_SECRET}
+      UWSGI_WORKERS: ${UWSGI_WORKERS:-2}
+      UWSGI_THREADS: ${UWSGI_THREADS:-2}
+
+  web-retrieval:
+    build: ./web-retrieval
+    restart: unless-stopped
+    ports:
+      - "${MCP_BIND_ADDRESS:-127.0.0.1}:${MCP_HOST_PORT:-8765}:8765"
+    volumes:
+      - ./web-retrieval/settings.toml:/app/settings.toml:ro
+    environment:
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8765
+      MCP_SERVER_NAME: ${MCP_SERVER_NAME:-web-retrieval}
+      MCP_SETTINGS_FILE: /app/settings.toml
+    depends_on:
+      - searxng

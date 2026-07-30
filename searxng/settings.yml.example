@@ -1,0 +1,11 @@
+# Minimal SearxNG template for the web-retrieval MCP server.
+# See https://docs.searxng.org/admin/settings/settings.html
+use_default_settings: true
+
+search:
+  formats:
+    - html
+    - json # Required by the web-retrieval MCP server.
+
+# Add only values that should differ from upstream SearxNG defaults.
+# Secrets and the public base URL belong in the repository's .env file.

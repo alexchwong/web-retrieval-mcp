@@ -1,0 +1,8 @@
+# Minimal SearxNG overrides required by the MCP service.
+# All other values inherit SearxNG's upstream defaults.
+use_default_settings: true
+
+search:
+  formats:
+    - html
+    - json # Required by the web-retrieval MCP server.

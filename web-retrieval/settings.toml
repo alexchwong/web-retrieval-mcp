@@ -1,0 +1,25 @@
+# Runtime policy for the web-retrieval MCP server. Changes load on the next tool call.
+
+[search]
+searxng_url = "http://searxng:8080"
+num_results = 8
+timeout_seconds = 10.0
+language = "en"
+safesearch = 0
+
+[fetch]
+concurrency = 6
+timeout_seconds = 12.0
+max_bytes = 20000000
+max_document_chars = 40000
+max_pdf_pages = 40
+user_agent = "web-retrieval/1.0"
+
+[chunk]
+words = 350
+overlap = 50
+
+[ranking]
+default_max_passages = 8
+max_passages = 20
+max_passages_per_source = 2
