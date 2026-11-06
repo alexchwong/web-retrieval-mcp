@@ -144,6 +144,11 @@ jobs:
                   f'Invalid release ZIP: bad={bad}; '
                   f'missing={sorted(expected - actual)}; extra={sorted(actual - expected)}'
               )
+          if not {prefix + 'scripts/smoke_mcp.sh', prefix + 'web-retrieval/outbound.py'} <= actual:
+              raise SystemExit('Missing smoke script or document transport')
+          if any(name.startswith(prefix + 'web-retrieval/testdata/')
+                 or name == prefix + 'web-retrieval/test_outbound.py' for name in actual):
+              raise SystemExit('Refusing to release outbound TLS test fixtures')
           if any(name.endswith('/.env') for name in actual):
               raise SystemExit('Refusing to release a local .env file')
           print(f'PASS: verified {len(expected)} release files')

@@ -9,7 +9,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py settings.py settings.toml ./
+COPY server.py outbound.py settings.py settings.toml ./
 
 EXPOSE 8765
 CMD ["python", "-u", "server.py"]

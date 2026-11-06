@@ -1,5 +1,14 @@
 # Changes
 
+## 0.1.1
+
+- Adds `web_search_results` for discovery without opening result pages.
+- Renames `search_web` to `web_evidence_passages` and `read_url` to `web_page_text`. Update existing callers and refresh their tool lists.
+- Adds supplied-URL evidence retrieval, search filters, source outcomes and PDF page provenance.
+- Validates public document destinations and redirects. Proxy-only document egress is no longer supported.
+- Adds document and evidence collection deadlines. Completed evidence can be returned when other sources stall.
+- Includes CLI smoke checks for all three tools and both evidence modes.
+
 ## 0.1.0
 
 - Initial versioned release of the local SearxNG-backed, stateless Streamable HTTP MCP service.

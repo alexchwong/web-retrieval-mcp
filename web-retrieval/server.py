@@ -1,314 +1,427 @@
-"""
-Web retrieval MCP server.
-
-Exposes two tools to an LLM running in llama-server's WebUI:
-
-  - search_web(query, max_passages=8)
-      Search the web (SearxNG), fetch top hits in parallel, chunk, BM25-rank
-      passages against the query, return the top-K passages with source URLs.
-      This is the cheap path; the LLM never sees the raw HTML.
-
-  - read_url(url)
-      Pull a single page through trafilatura and return clean text.
-      Escape valve when the model decides it needs to see one source in full.
-
-Notes:
-  - Runs as Streamable HTTP with stateless_http=True.
-    Required because llama.cpp WebUI bug #20471 doesn't forward MCP-Session-Id
-    on subsequent requests; stateless mode skips that handshake.
-  - Bound to all interfaces inside the container; ports are mapped to
-    loopback only on the host (see docker-compose.yml).
-"""
+"""Stateless Streamable HTTP tools for web discovery and evidence retrieval."""
 from __future__ import annotations
 
 import asyncio
+from calendar import monthrange
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+import logging
 import os
 import re
-import logging
 from typing import Any
-from urllib.parse import urlparse
 
-import httpx
-import pymupdf  # PyMuPDF; also importable as `fitz`
-import trafilatura
 from fastmcp import FastMCP
+import httpx
+import pymupdf
 from rank_bm25 import BM25Okapi
-from settings import FetchSettings, SearchSettings, SettingsManager
+import trafilatura
+
+import outbound
+from settings import FetchSettings, SearchSettings, Settings, SettingsManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("web-retrieval")
-
 MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 MCP_PORT = int(os.getenv("MCP_PORT", "8765"))
-MCP_SERVER_NAME = os.getenv("MCP_SERVER_NAME", "web-retrieval")
-
-# Filetypes we don't try to extract (archives, media). PDFs are handled.
-SKIP_EXTS = re.compile(
-    r"\.(zip|tar|gz|7z|rar|mp[34]|m4a|wav|mov|avi|mkv|jpg|jpeg|png|gif|webp|svg|ico)(\?|$)",
-    re.IGNORECASE,
-)
-
-mcp = FastMCP(MCP_SERVER_NAME)
+mcp = FastMCP(os.getenv("MCP_SERVER_NAME", "web-retrieval"))
 settings_manager = SettingsManager()
+SKIP_EXTS = re.compile(
+    r"\.(zip|tar|gz|7z|rar|mp[34]|m4a|wav|mov|avi|mkv|jpg|jpeg|png|gif|webp|svg|ico)$", re.I
+)
+_NATIVE = {"1d": "day", "1w": "week", "7d": "week", "1m": "month", "1y": "year", "12m": "year"}
 
 
-# ---------- helpers --------------------------------------------------------- #
-
-def _tokenize(text: str) -> list[str]:
-    """Cheap, deterministic tokenizer for BM25. Lowercase alphanumeric runs."""
-    return re.findall(r"\w+", text.lower())
-
-
-def _chunk_words(text: str, size: int, overlap: int) -> list[str]:
-    words = text.split()
-    if not words:
-        return []
-    out, i, step = [], 0, max(1, size - overlap)
-    while i < len(words):
-        chunk = " ".join(words[i : i + size]).strip()
-        if chunk:
-            out.append(chunk)
-        i += step
-    return out
+@dataclass(frozen=True)
+class Search:
+    query: str
+    domains: tuple[str, ...]
+    cutoff: date | None
+    metadata: dict[str, Any]
 
 
-async def _searxng(
-    client: httpx.AsyncClient, query: str, settings: SearchSettings
-) -> list[dict]:
-    r = await client.get(
-        f"{settings.searxng_url}/search",
-        params={
-            "q": query,
-            "format": "json",
-            "safesearch": str(settings.safesearch),
-            "language": settings.language,
-        },
-        timeout=settings.timeout_seconds,
-    )
-    r.raise_for_status()
-    data = r.json()
-    out = []
-    for item in data.get("results", []):
-        url = item.get("url")
-        if not url or SKIP_EXTS.search(url):
-            continue
-        out.append({
-            "url": url,
-            "title": item.get("title", "") or "",
-            "snippet": item.get("content", "") or "",
-        })
-        if len(out) >= settings.num_results:
-            break
-    return out
+def _months_before(today: date, months: int) -> date:
+    year, month = divmod(today.year * 12 + today.month - 1 - months, 12)
+    return date(year, month + 1, min(today.day, monthrange(year, month + 1)[1]))
 
 
-def _extract_html(html: str, max_chars: int) -> str:
-    """Sync HTML->text extraction; run in a worker thread."""
-    text = trafilatura.extract(
-        html,
-        include_comments=False,
-        include_tables=True,
-        favor_recall=False,
-        no_fallback=False,
-    )
-    return (text or "")[:max_chars]
+def _search_input(query: str, recency: str | None, domains: list[str] | None,
+                  today: date) -> Search:
+    normalized = ()
+    if domains is not None:
+        if not 1 <= len(domains) <= 5:
+            raise ValueError("domains must contain one to five DNS names")
+        normalized = tuple(dict.fromkeys(outbound.dns_name(domain.strip()) for domain in domains))
+    cutoff = None
+    method, time_range = "none", None
+    if recency is not None:
+        match = re.fullmatch(r"([1-9][0-9]{0,2})([dwmy])", recency)
+        if match is None:
+            raise ValueError("recency must use a positive number and d, w, m or y")
+        amount, unit = int(match[1]), match[2]
+        if amount > {"d": 365, "w": 52, "m": 60, "y": 5}[unit]:
+            raise ValueError("recency exceeds the allowed range")
+        if unit in ("d", "w"):
+            cutoff = today - timedelta(days=amount * (7 if unit == "w" else 1))
+        else:
+            cutoff = _months_before(today, amount * (12 if unit == "y" else 1))
+        if recency in _NATIVE:
+            method, time_range = "native", _NATIVE[recency]
+        elif cutoff >= _months_before(today, 12):
+            days = (today - cutoff).days
+            time_range = next((window for cap, window in ((7, "week"), (28, "month"), (365, "year"))
+                               if days <= cap), None)
+        if method == "none":
+            method = "native_widened" if time_range else "local_dates_only"
+    if len(normalized) == 1:
+        query += f" site:{normalized[0]}"
+    return Search(query, normalized, cutoff, {
+        "recency": recency, "recency_method": method, "time_range": time_range,
+        "as_of_utc": today.isoformat(), "cutoff_utc": cutoff.isoformat() if cutoff else None,
+        "domains": list(normalized),
+    })
 
 
-def _extract_pdf(data: bytes, max_pages: int, max_chars: int) -> str:
-    """Sync PDF->text extraction via PyMuPDF; run in a worker thread.
-
-    Caps at the configured page and character limits so a 600-page
-    PDF can't blow up the model's context. Returns "" on encrypted or
-    malformed files rather than raising.
-    """
+def _publication(value: Any) -> tuple[date | None, str | None]:
+    if not isinstance(value, str):
+        return None, None
     try:
-        parts: list[str] = []
-        total = 0
-        with pymupdf.open(stream=data, filetype="pdf") as doc:
-            for i in range(min(doc.page_count, max_pages)):
-                page_text = doc[i].get_text("text")
-                parts.append(page_text)
-                total += len(page_text)
-                if total >= max_chars:
-                    break
-        return "\n".join(parts)[:max_chars]
-    except Exception as e:  # encrypted, corrupt, or not actually a PDF
-        log.info("pdf extract failed: %s", e)
-        return ""
+        if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            parsed = date.fromisoformat(value)
+            return parsed, parsed.isoformat()
+        if not re.match(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ]", value):
+            return None, None
+        instant = datetime.fromisoformat(value.removesuffix("Z") + (
+            "+00:00" if value.endswith("Z") else ""))
+        if instant.tzinfo is None:
+            return instant.date(), instant.date().isoformat()
+        instant = instant.astimezone(timezone.utc)
+        return instant.date(), instant.isoformat()
+    except (ValueError, OverflowError):
+        return None, None
 
 
-async def _fetch_one(
-    client: httpx.AsyncClient,
-    url: str,
-    sem: asyncio.Semaphore,
-    settings: FetchSettings,
-) -> str:
-    """Fetch one URL and return clean text. Handles HTML and PDF; skips the rest.
+def _summary(value: Any, limit: int) -> str:
+    text = " ".join(value.split()) if isinstance(value, str) else ""
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
-    Streams the body so an oversized response is abandoned mid-download
-    instead of being buffered whole.
-    """
+
+@dataclass(frozen=True)
+class Source:
+    url: outbound.URL
+    fields: dict[str, Any]
+
+
+async def _searxng(search: Search, settings: SearchSettings) -> tuple[list[Source], str]:
+    params = {"q": search.query, "format": "json", "safesearch": str(settings.safesearch),
+              "language": settings.language}
+    if search.metadata["time_range"]:
+        params["time_range"] = search.metadata["time_range"]
+    async with httpx.AsyncClient(http2=True, follow_redirects=False,
+                                 timeout=settings.timeout_seconds) as client:
+        response = await client.get(f"{settings.searxng_url}/search", params=params)
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        raise ValueError("invalid search response")
+    sources = []
+    seen = set()
+    for item in payload["results"]:
+        if not isinstance(item, dict) or not isinstance(item.get("url"), str):
+            continue
+        try:
+            url = outbound.parse_url(item["url"])
+        except ValueError:
+            continue
+        if (url.credentialed or url.key in seen or SKIP_EXTS.search(url.path)
+                or not outbound.matches(url.host, search.domains)):
+            continue
+        published_date, published_at = _publication(item.get("publishedDate"))
+        if search.cutoff and published_date and published_date < search.cutoff:
+            continue
+        fields = {"title": _summary(item.get("title"), 300),
+                  "snippet": _summary(item.get("content"), 600), "origin": "search_snippet"}
+        if published_at:
+            fields["published_at"] = published_at
+        sources.append(Source(url, fields))
+        seen.add(url.key)
+        if len(sources) >= settings.num_results:
+            break
+    return sources, "no_eligible_results" if payload["results"] else "no_results"
+
+
+def _supplied(urls: list[str], limit: int) -> list[Source]:
+    if len(urls) > limit:
+        raise ValueError(f"urls may contain at most {limit} entries")
+    sources = []
+    seen = set()
+    for index, value in enumerate(urls, 1):
+        try:
+            url = outbound.parse_url(value)
+        except ValueError:
+            raise ValueError(f"URL item {index} must be a valid absolute HTTP(S) URL") from None
+        if not url.credentialed:
+            if url.key in seen:
+                continue
+            seen.add(url.key)
+        sources.append(Source(url, {"title": "", "origin": "supplied_url"}))
+    return sources
+
+
+@dataclass(frozen=True)
+class Document:
+    status: str
+    error: str = ""
+    final: outbound.URL | None = None
+    origin: str = ""
+    units: tuple[tuple[int | None, str], ...] = ()
+    truncated: bool = False
+    input_capped: bool = False
+    pages_examined: int | None = None
+
+    def metadata(self, initial: outbound.URL) -> dict[str, Any]:
+        result: dict[str, Any] = {"fetch_status": self.status}
+        if self.status == "fetched":
+            result["truncated"] = self.truncated
+            if self.final and self.final.key != initial.key:
+                result["final_url"] = self.final.visible
+        if self.input_capped:
+            result["html_input_capped"] = True
+        return result
+
+
+def _extract(download: outbound.Download, settings: FetchSettings) -> Document:
+    cap = settings.max_document_chars
+    capped = False
+    pages = None
+    units: list[tuple[int | None, str]] = []
+    try:
+        if download.kind == "fetched_pdf":
+            remaining = cap
+            pages = 0
+            with pymupdf.open(stream=download.data, filetype="pdf") as pdf:
+                if pdf.needs_pass:
+                    raise ValueError("encrypted PDF")
+                truncated = False
+                for index in range(min(len(pdf), settings.max_pdf_pages)):
+                    if remaining <= 0:
+                        break
+                    text = pdf[index].get_text("text")
+                    pages += 1
+                    remaining -= bool(units)
+                    units.append((index + 1, text[:remaining]))
+                    if len(text) > remaining:
+                        truncated = True
+                    remaining -= len(text)
+                truncated = truncated or pages < len(pdf)
+        else:
+            html = download.data.decode(download.encoding, errors="replace")
+            capped = len(html) > cap * 4
+            text = trafilatura.extract(html[:cap * 4], include_comments=False,
+                                       include_tables=True, favor_recall=False, no_fallback=False) or ""
+            truncated = len(text) > cap
+            units.append((None, text[:cap]))
+    except Exception:
+        return Document("extract_failed", "document extraction failed", input_capped=capped)
+    if not any(text.strip() for _, text in units):
+        return Document("extract_failed", "document has no extractable text", input_capped=capped)
+    return Document("fetched", final=download.final, origin=download.kind, units=tuple(units),
+                    truncated=truncated, input_capped=capped, pages_examined=pages)
+
+
+_TIMEOUT = Document("timeout", "document retrieval timed out")
+
+
+async def _fetch(source: Source, settings: FetchSettings, domains: tuple[str, ...],
+                 sem: asyncio.Semaphore) -> Document:
     async with sem:
-        try:
-            async with client.stream(
-                "GET",
-                url,
-                timeout=settings.timeout_seconds,
-                follow_redirects=True,
-                headers={
-                    "User-Agent": settings.user_agent,
-                    "Accept": "text/html,application/xhtml+xml,application/pdf",
-                },
-            ) as r:
-                r.raise_for_status()
-                ctype = r.headers.get("content-type", "").lower()
-                path = urlparse(url).path.lower()
-                # Trust content-type first, fall back to the URL extension.
-                is_pdf = "application/pdf" in ctype or path.endswith(".pdf")
-                is_html = "html" in ctype or "xml" in ctype
-                if not (is_pdf or is_html):
-                    return ""
-                encoding = r.encoding or "utf-8"
-
-                buf = bytearray()
-                async for chunk in r.aiter_bytes():
-                    buf += chunk
-                    if len(buf) > settings.max_bytes:
-                        log.info("response too large, abandoned: %s", url)
-                        return ""
-        except Exception as e:
-            log.info("fetch failed %s: %s", url, e)
-            return ""
-
-    # Extraction is CPU-bound and synchronous — offload to a worker thread.
-    if is_pdf:
-        return await asyncio.to_thread(
-            _extract_pdf,
-            bytes(buf),
-            settings.max_pdf_pages,
-            settings.max_document_chars,
-        )
-    html = buf.decode(encoding, errors="replace")[: settings.max_document_chars * 4]
-    return await asyncio.to_thread(_extract_html, html, settings.max_document_chars)
+        task = asyncio.create_task(outbound.download(source.url, settings, domains))
+        if not await outbound.wait_owned([task], settings.timeout_seconds * 4):
+            return _TIMEOUT
+        downloaded = task.result()
+    if downloaded.status != "fetched":
+        return Document(downloaded.status, downloaded.error)
+    try:
+        return await asyncio.to_thread(_extract, downloaded, settings)
+    except Exception:
+        return Document("extract_failed", "document extraction failed")
 
 
-# ---------- tools ----------------------------------------------------------- #
+def _source_fields(source: Source, index: int) -> dict[str, Any]:
+    return {"source_id": f"s{index}", "url": source.url.visible, **source.fields}
+
+
+def _rank(query: str, sources: list[Source], docs: list[Document], settings: Settings,
+          limit: int) -> list[dict[str, Any]]:
+    candidates = []
+    keys = []
+    stride = settings.chunk.words - settings.chunk.overlap
+    for index, (source, doc) in enumerate(zip(sources, docs), 1):
+        for page, text in doc.units:
+            words = text.split()
+            for start in range(0, len(words), stride):
+                candidates.append({
+                    "source_id": f"s{index}", "title": source.fields["title"], "url": source.url.visible,
+                    "text": " ".join(words[start:start + settings.chunk.words]), "origin": doc.origin,
+                    "truncated": doc.truncated, **({"page": page} if page is not None else {}),
+                })
+                keys.append((doc.final or source.url).key)
+    if not candidates:
+        return []
+    tokens = [re.findall(r"\w+", candidate["text"].lower()) for candidate in candidates]
+    scores = (BM25Okapi(tokens).get_scores(re.findall(r"\w+", query.lower()))
+              if any(tokens) else [0.0] * len(tokens))
+    selected = []
+    used: dict[str, int] = {}
+    seen = set()
+    for index in sorted(range(len(scores)), key=lambda i: -scores[i]):
+        candidate, key = candidates[index], keys[index]
+        if used.get(key, 0) >= settings.ranking.max_passages_per_source or candidate["text"] in seen:
+            continue
+        selected.append({**candidate, "score": round(float(scores[index]), 3)})
+        used[key] = used.get(key, 0) + 1
+        seen.add(candidate["text"])
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _invalid(error: str, **fields: Any) -> dict[str, Any]:
+    return {"status": "failed", "reason": "invalid_input", "error": error, **fields}
+
+
+def _backend_failed() -> dict[str, str]:
+    return {"status": "failed", "reason": "search_backend_failed", "error": "search backend failed"}
+
+
+def _query(query: str) -> None:
+    if not query.strip():
+        raise ValueError("query must not be blank")
+
 
 @mcp.tool
-async def search_web(query: str, max_passages: int | None = None) -> dict[str, Any]:
-    """
-    Search the web and return the most relevant passages for the query.
-
-    Use this FIRST for any factual question that needs current information.
-    Returns 8 short passages (each ~350 words) with source URLs. Cite them
-    by URL in your answer. If a passage looks promising but incomplete,
-    you can call read_url(url) to get the full page.
-
-    Args:
-        query: A focused search query. Keep it short (3-8 words works best).
-        max_passages: Number of passages to return (default 8, max 20).
-
-    Returns:
-        {
-          "passages": [{"text": "...", "url": "...", "title": "...", "score": 0.0}, ...],
-          "sources":  [{"url": "...", "title": "...", "snippet": "..."}, ...]
-        }
+async def web_search_results(query: str, recency: str | None = None,
+                             domains: list[str] | None = None) -> dict[str, Any]:
+    """Preview titles, URLs and search-engine summaries without opening pages.
+    Recency is best effort. One domain targets search; several filter one general results page.
     """
     settings = settings_manager.get()
-    requested_passages = (
-        settings.ranking.default_max_passages if max_passages is None else int(max_passages)
-    )
-    max_passages = max(1, min(requested_passages, settings.ranking.max_passages))
-    log.info("search_web: %r (k=%d)", query, max_passages)
+    try:
+        _query(query)
+        search = _search_input(query, recency, domains, datetime.now(timezone.utc).date())
+    except ValueError as exc:
+        return _invalid(str(exc), sources=[])
+    result: dict[str, Any] = {"search": search.metadata, "sources": []}
+    try:
+        sources, reason = await _searxng(search, settings.search)
+    except (ValueError, httpx.HTTPError, httpx.InvalidURL, asyncio.TimeoutError):
+        return {**result, **_backend_failed()}
+    result.update(status="complete", sources=[
+        {**_source_fields(source, index), "fetch_status": "not_attempted"}
+        for index, source in enumerate(sources, 1)
+    ])
+    if not sources:
+        result["reason"] = reason
+    return result
 
-    async with httpx.AsyncClient(http2=True) as client:
+
+@mcp.tool
+async def web_evidence_passages(query: str, max_passages: int | None = None,
+                                recency: str | None = None, domains: list[str] | None = None,
+                                urls: list[str] | None = None) -> dict[str, Any]:
+    """Fetch evidence passages ranked for lexical relevance to the query.
+    A nonempty URL list bypasses search and disallows recency and domains.
+    In web search mode, recency is best effort. One domain targets search;
+    several domains filter one general results page.
+    """
+    settings = settings_manager.get()
+    result: dict[str, Any] = {"sources": [], "passages": []}
+    try:
+        _query(query)
+        if urls:
+            if recency is not None or domains is not None:
+                raise ValueError("omit recency and domains when supplying URLs")
+            sources = _supplied(urls, settings.search.num_results)
+            search = None
+        else:
+            search = _search_input(query, recency, domains, datetime.now(timezone.utc).date())
+    except ValueError as exc:
+        return _invalid(str(exc), **result)
+
+    loop = asyncio.get_running_loop()
+    if search is None:
+        result["mode"] = "supplied_urls"
+        deadline = loop.time() + min(45, settings.fetch.timeout_seconds * 4)
+    else:
+        result.update(mode="web_search", search=search.metadata)
+        deadline = loop.time() + min(45, settings.search.timeout_seconds + settings.fetch.timeout_seconds * 3)
+        task = asyncio.create_task(_searxng(search, settings.search))
         try:
-            hits = await _searxng(client, query, settings.search)
-        except Exception as e:
-            return {"error": f"searxng unreachable: {e}", "passages": [], "sources": []}
+            if not await outbound.wait_owned([task], deadline - loop.time()):
+                return {**result, **_backend_failed()}
+            sources, reason = task.result()
+        except (ValueError, httpx.HTTPError, httpx.InvalidURL, asyncio.TimeoutError):
+            return {**result, **_backend_failed()}
+        if not sources:
+            return {**result, "status": "complete", "reason": reason}
 
-        if not hits:
-            return {"passages": [], "sources": []}
-
+    remaining = deadline - loop.time()
+    if remaining > 0:
         sem = asyncio.Semaphore(settings.fetch.concurrency)
-        texts = await asyncio.gather(
-            *[_fetch_one(client, h["url"], sem, settings.fetch) for h in hits]
-        )
-
-    # Build a flat list of (passage, source-meta) pairs
-    passages: list[dict[str, Any]] = []
-    for hit, text in zip(hits, texts):
-        if not text:
-            continue
-        for chunk in _chunk_words(text, settings.chunk.words, settings.chunk.overlap):
-            passages.append({"text": chunk, "url": hit["url"], "title": hit["title"]})
-
-    sources = [
-        {"url": h["url"], "title": h["title"], "snippet": h["snippet"]}
-        for h in hits
+        tasks = [asyncio.create_task(_fetch(source, settings.fetch, search.domains if search else (), sem))
+                 for source in sources]
+        done = await outbound.wait_owned(tasks, remaining)
+        docs = [task.result() if task in done else _TIMEOUT for task in tasks]
+    else:
+        docs = [_TIMEOUT] * len(sources)
+    result["sources"] = [
+        {**_source_fields(source, index), **doc.metadata(source.url)}
+        for index, (source, doc) in enumerate(zip(sources, docs), 1)
     ]
-
-    if not passages:
-        # All fetches failed; the model still gets the snippets to work with
-        return {"passages": [], "sources": sources, "note": "no pages fetched; snippets only"}
-
-    # BM25 rank passages by relevance to the query
-    tokenized = [_tokenize(p["text"]) for p in passages]
-    bm25 = BM25Okapi(tokenized)
-    scores = bm25.get_scores(_tokenize(query))
-
-    ranked_idx = sorted(range(len(scores)), key=lambda i: -scores[i])[:max_passages]
-    top = []
-    seen_urls: dict[str, int] = {}
-    for i in ranked_idx:
-        p = passages[i]
-        # Light diversity: cap passages from any one source URL.
-        if seen_urls.get(p["url"], 0) >= settings.ranking.max_passages_per_source:
-            continue
-        seen_urls[p["url"]] = seen_urls.get(p["url"], 0) + 1
-        top.append({**p, "score": round(float(scores[i]), 3)})
-
-    return {"passages": top, "sources": sources}
+    requested = settings.ranking.default_max_passages if max_passages is None else max_passages
+    result["passages"] = _rank(query, sources, docs, settings,
+                               max(1, min(requested, settings.ranking.max_passages)))
+    if not result["passages"]:
+        result.update(status="failed", reason="no_evidence")
+        if all(doc.status != "fetched" for doc in docs) and any(
+            source.fields.get("snippet") for source in sources
+        ):
+            result["note"] = "no pages fetched; snippets only"
+    elif any(doc.status != "fetched" for doc in docs):
+        result.update(status="partial", reason="some_fetches_failed")
+    else:
+        result["status"] = "complete"
+    return result
 
 
 @mcp.tool
-async def read_url(url: str) -> dict[str, Any]:
-    """
-    Fetch a single URL and return clean, extracted text.
-
-    Handles both HTML pages and PDF files (PDFs are extracted with PyMuPDF,
-    capped at the first 40 pages). Use SPARINGLY — only when a passage from
-    search_web() looks promising but incomplete, or when the user gives you a
-    URL directly. The full document can be large; prefer search_web() first.
-
-    Args:
-        url: A full http(s) URL, pointing to an HTML page or a PDF.
-
-    Returns:
-        {"url": "...", "text": "...", "chars": N} or {"error": "..."}
-    """
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return {"error": "url must be http(s)"}
+async def web_page_text(url: str) -> dict[str, Any]:
+    """Extract the main text of one known public HTML or PDF URL, subject to document limits."""
     settings = settings_manager.get()
-    log.info("read_url: %s", url)
-    async with httpx.AsyncClient(http2=True) as client:
-        sem = asyncio.Semaphore(1)
-        text = await _fetch_one(client, url, sem, settings.fetch)
-    if not text:
-        return {"error": "fetch or extraction failed", "url": url}
-    return {"url": url, "text": text, "chars": len(text)}
+    try:
+        parsed = outbound.parse_url(url)
+    except ValueError as exc:
+        error = "url must be http(s)" if str(exc) == "url must be http(s)" else "invalid URL syntax"
+        return _invalid(error)
+    doc = await _fetch(Source(parsed, {}), settings.fetch, (), asyncio.Semaphore(1))
+    result = {"url": parsed.visible, **doc.metadata(parsed)}
+    if doc.status != "fetched":
+        return {**result, "status": "failed", "error": doc.error}
+    text = "\n".join(text for _, text in doc.units)
+    result.update(status="complete", source_id="s1", origin=doc.origin, text=text, chars=len(text))
+    if doc.pages_examined is not None:
+        result["pages_examined"] = doc.pages_examined
+    return result
 
 
 # ---------- entrypoint ------------------------------------------------------ #
 
 if __name__ == "__main__":
-    startup_settings = settings_manager.get()
+    settings_manager.get()
     log.info(
-        "starting web retrieval MCP on %s:%d (SearxNG=%s)",
+        "starting web retrieval MCP on %s:%d",
         MCP_HOST,
         MCP_PORT,
-        startup_settings.search.searxng_url,
     )
     # stateless_http=True is REQUIRED for llama.cpp WebUI compatibility
     # (it does not forward MCP-Session-Id on follow-up requests; see issue #20471)

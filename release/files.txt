@@ -6,6 +6,15 @@ docker-compose.yml
 docker-compose.yml.example
 docs/
 searxng/
-web-retrieval/
+web-retrieval/Dockerfile
+web-retrieval/requirements.txt
+web-retrieval/server.py
+web-retrieval/outbound.py
+web-retrieval/settings.py
+web-retrieval/settings.toml
+web-retrieval/settings.toml.example
+web-retrieval/test_server.py
+web-retrieval/test_settings.py
+scripts/smoke_mcp.sh
 release/VERSION
 release/files.txt

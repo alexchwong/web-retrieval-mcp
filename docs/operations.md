@@ -38,45 +38,15 @@ existing secret, while the packaged `.env.example` does not contain one.
 
 ## Verify the installation
 
-There is no `/health` endpoint in version 0.1.0. The following checks do not
-require Python or MCP packages on the **host**: they use the container's Python
-and FastMCP environment. They verify independent layers:
+From the installation directory run `docker compose ps`, then
+`bash scripts/smoke_mcp.sh`. The checks cover all three tools, including both
+evidence modes. For individual checks, environment overrides and lifecycle
+commands, see the [README](../README.md#cli-sanity-checks).
 
-1. Confirm both containers are running with `docker compose ps`.
-2. Run the following from the repository root:
-
-```bash
-docker compose exec -T web-retrieval python - <<'PY'
-import asyncio
-import httpx
-from fastmcp import Client
-
-async def check():
-    async with httpx.AsyncClient(timeout=15) as http:
-        response = await http.get(
-            "http://searxng:8080/search",
-            params={"q": "test", "format": "json"},
-        )
-        response.raise_for_status()
-        payload = response.json()
-        assert isinstance(payload.get("results"), list), "missing results array"
-    print("PASS: SearxNG returned JSON search results")
-
-    async with Client("http://127.0.0.1:8765/mcp") as client:
-        names = {tool.name for tool in await client.list_tools()}
-    required = {"search_web", "read_url"}
-    assert required <= names, f"MCP tools missing: {required - names}"
-    print("PASS: Streamable HTTP MCP advertises both tools")
-
-asyncio.run(check())
-PY
-```
-
-Expect **two `PASS` lines and exit code 0**. An exception or assertion is a
-failure. These tests do not verify upstream search quality, PDF extraction
-accuracy or individual AI clients. After they pass, make one live tool call
-from your client. If using an external SearxNG instance, adjust the SearxNG
-check to that server's URL.
+To isolate search-backend startup or configuration problems, check
+`docker compose logs --tail=80 searxng` and verify that the configured
+SearxNG `/search` endpoint returns a JSON object with a `results` array
+for the `q=test&format=json` query.
 
 ## Troubleshooting
 
@@ -109,7 +79,8 @@ repository-root `.clinerules`; it does not replace `DEVEL.md`.
 
 CI runs on pushes/PRs targeting **`devel` or `main`** with a four-way matrix:
 **Linux/macOS × Python 3.10/3.13**. Its offline checks cover settings
-validation and reload, MCP tool registration and stateless route construction.
+validation and reload, MCP registration and transport, discovery, evidence
+ranking and outcomes, outbound URL policy and local TLS verification.
 They do **not** require SearxNG or external websites and do not replace the
 optional Docker connectivity check above.
 
@@ -130,8 +101,9 @@ Version control follows NEL's small release convention:
 
 The release archive contains only tracked files listed in
 [`release/files.txt`](../release/files.txt). It includes Compose, templates,
-source, tests, documentation, `setup.sh` and version metadata, but **not**
-`.env` secrets or GitHub workflow files. `workflow_dispatch` can run the release
+runtime source, selected tests, documentation, `setup.sh`, the smoke script and
+version metadata. The outbound security test and its TLS fixtures remain in the
+source checkout for CI. The ZIP excludes `.env` secrets and GitHub workflows. `workflow_dispatch` can run the release
 workflow manually; it still releases the current `main` commit, not `devel`.
 
 **Release caveat:** A GitHub release is only available after the files have

@@ -3,7 +3,7 @@
 [Back to README](../README.md)
 
 **This is a local/private experimental service, not a hardened public MCP
-endpoint.** Both tools are read-only in the sense that they do not deliberately
+endpoint.** The tools are read-only in the sense that they do not deliberately
 modify application data, but they **make outbound network requests**. That
 still creates security, privacy and resource-use risks.
 
@@ -29,18 +29,19 @@ Source: [FastMCP 4.1.6 settings](https://github.com/PrefectHQ/fastmcp/blob/v4.1.
 
 ## SSRF and internal-network requests
 
-`read_url(url)` only checks that the URL scheme is `http` or `https`.
-The HTTP client follows redirects. There is currently **no** hostname/IP
-allowlist or blocklist, no DNS resolution check to prevent private, loopback,
-link-local or cloud metadata addresses, and no redirect-target revalidation.
-An untrusted or manipulated caller could therefore make the server request
-internal network resources accessible **from inside the container** (SSRF).
-`search_web` also fetches result URLs supplied by SearxNG; it does not impose
-an independent destination safety policy.
+Document requests accept public HTTP(S) destinations on the scheme's standard
+port. They reject credentials, nonpublic addresses, ambiguous host syntax,
+unsafe redirects and HTTPS downgrades. The entire DNS answer set is checked
+and each request connects to a validated numeric address while verifying the
+logical TLS identity. Each redirect repeats the checks. Caller-specified
+search domains constrain redirect destinations too.
 
-The byte/page/character limits reduce individual response size but do not
-make arbitrary URL fetching safe; neither does Docker's host-port loopback
-binding prevent all Docker-network or same-host callers.
+Document requests bypass environment proxies because a proxy can resolve or
+reroute the target. Proxy-only egress therefore no longer works for document
+fetches. The configured SearxNG route is separate and can be private. Discovery
+summaries and extracted content are untrusted. A model can be steered by
+fetched text into requesting an internal resource even on a loopback
+deployment. Keep the service private and use network isolation where needed.
 
 ## Information leaving the machine
 
@@ -68,7 +69,7 @@ binding prevent all Docker-network or same-host callers.
 4. If multi-user or off-host access is necessary, design and test proper
    authentication, destination restrictions (including redirects), network
    isolation, TLS, request limits and Host/Origin handling **before** opening
-   a listener. These are **not implemented** in this documentation refactor.
+   a listener. The outbound checks cover document destinations. Off-host access still requires a separate deployment security design.
 
 ## Limits of protection and testing
 

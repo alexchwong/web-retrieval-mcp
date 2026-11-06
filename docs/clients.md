@@ -151,6 +151,6 @@ Source: [llama.cpp server README](https://github.com/ggml-org/llama.cpp/blob/mas
   and HTTP Host/Origin request validation are **different** concerns. A proxy
   may be required; changing only an MCP URL will not fix a browser CORS block.
 
-After connecting, ask the client to **list MCP tools** (expect `search_web` and
-`read_url`) and then perform a small search that cites the source URLs.
+After connecting, ask the client to **list MCP tools** (expect `web_search_results`,
+`web_evidence_passages` and `web_page_text`) and then perform a small search that cites the source URLs.
 See [troubleshooting](operations.md#troubleshooting) and [security](security.md).

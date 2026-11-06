@@ -46,7 +46,7 @@ built-in defaults in `web-retrieval/settings.py`.
 | `search.language` | `en` | Search language. |
 | `search.safesearch` | `0` | Search filtering: 0, 1 or 2. |
 | `fetch.concurrency` | `6` | Concurrent URL downloads in a search call. |
-| `fetch.timeout_seconds` | `12.0` | Per-fetch timeout setting; **not** a hard whole-call deadline. |
+| `fetch.timeout_seconds` | `12.0` | HTTP timeout per document network operation. See the separate budgets below. |
 | `fetch.max_bytes` | `20000000` | Maximum fetched response size per URL. |
 | `fetch.max_document_chars` | `40000` | Extracted text cap per fetched document. |
 | `fetch.max_pdf_pages` | `40` | PDF pages inspected at most. |
@@ -63,7 +63,7 @@ the TOML file read-only **inside** the container; the host copy is editable.
 
 ### Live reload
 
-Each `search_web` or `read_url` invocation retrieves one immutable settings
+Each MCP tool invocation retrieves one immutable settings
 snapshot. The manager checks the settings file's **modification time in
 nanoseconds and byte size**. A valid *detected* edit is used by that call,
 without restarting the server. **Not every edit is guaranteed to be noticed**:
@@ -76,36 +76,47 @@ For separate non-Compose execution, `MCP_SETTINGS_FILE` can select a different
 TOML path. `MCP_HOST`, `MCP_PORT` and `MCP_SERVER_NAME` are read at process
 startup and require a process restart to change.
 
-## MCP tools: inputs, outputs and limits
+## MCP tools and response fields
 
-### `search_web(query: str, max_passages: int | None = None)`
+- `web_search_results(query, recency=None, domains=None)` returns search-engine
+  titles, URLs and summaries with no document requests. Its sources have
+  `origin="search_snippet"` and `fetch_status="not_attempted"`.
+- `web_evidence_passages(query, max_passages=None, recency=None, domains=None, urls=None)`
+  returns ranked `passages` and `sources`. Omit `urls`, pass null, or pass
+  an empty array to discover sources. A nonempty array bypasses SearxNG and keeps
+  the ranking query local. The raw array may contain up to `search.num_results`
+  URLs. Omit `recency` and `domains` in this mode. The response has
+  `mode="web_search"` or `mode="supplied_urls"`. Supplied sources have
+  `origin="supplied_url"` with no search summary. Fetched passages link to
+  their source via `source_id`; PDF passages include a one-based `page`.
+  BM25 scores describe lexical relevance. `max_passages` is clamped to the
+  configured range and the result can contain fewer unique passages.
+- `web_page_text(url)` extracts one public HTML/XML-like or PDF URL and
+  returns `url`, `text` and `chars` on success. PDFs report pages examined.
+  A safe redirect can add `final_url`.
 
-1. Search SearxNG, considering at most `search.num_results` eligible URLs.
-2. Concurrently fetch their HTML or PDF contents. Failed downloads are skipped.
-3. Extract text; split into overlapping word chunks and rank them lexically
-   with BM25 against the query.
-4. Return `{"passages": [...], "sources": [...]}`. Each passage contains
-   `text`, `url`, `title` and BM25 `score`; each source contains `url`, `title`
-   and SearxNG `snippet`.
+Discovery supports recency from 1–365 days, 1–52 weeks, 1–60 months or
+1–5 years, expressed as `7d`, `1w`, `3m` or `2y`. Search metadata
+reports the UTC cutoff and backend time window. Known publication dates
+before the cutoff are filtered. Undated results remain eligible. Native
+windows are best effort and can exclude engines without time-range support.
+Use one DNS domain for targeted search. Multiple domains filter one general
+results page and can miss eligible sites. Allowed subdomains must match at a
+DNS label boundary, including after redirects.
 
-The caller can set `max_passages` (clamped from 1 to
-`ranking.max_passages`); the number returned can be **smaller** than requested,
-including when diversity filtering removes items. If no documents are fetched,
-there may be `sources` with no `passages` and a `note`. A SearxNG failure
-produces an `error` with empty lists. A BM25 score is lexical relevance,
-**not** factual confidence or source credibility.
+Use `status` (`complete`, `partial`, `failed`), `reason` where supplied and
+each `fetch_status` to interpret results. Empty discovery can complete
+successfully. Evidence with no usable passages fails with `no_evidence` when
+there were source hits. `truncated` indicates an extraction limit, and
+`html_input_capped` means the HTML input was clipped before extraction.
 
-### `read_url(url: str)`
-
-Accepts a URL whose parsed scheme is `http` or `https`; fetches that single
-address (following redirects) and returns `{"url": ..., "text": ...,
-"chars": ...}` or an `error` dictionary. Only HTML/XML-like and PDF responses
-are extracted. Fetch-byte, PDF-page and extracted-character caps apply. The
-returned text is not guaranteed to be the full source or to preserve layout.
-
-**Security:** there is currently **no check** for local, private, link-local or
-cloud metadata IP addresses, either before the request or after redirects.
-Only use with trusted local MCP clients; see [security](security.md).
+The document network budget is four times the per-operation timeout (48 s
+by default). Evidence collection, including extraction, has a separate
+deadline of up to 45 s. It is the lesser of 45 s and the search timeout plus
+three fetch timeouts for discovery, or four fetch timeouts for supplied URLs.
+Evidence completed by the deadline can be returned as partial. Cleanup and
+ranking take additional time. `web_page_text` can take its network budget
+plus extraction. See [security](security.md) for outbound restrictions.
 
 ## Using another SearxNG instance
 
@@ -125,7 +136,8 @@ Linux and macOS, installing dependencies from
 is pinned to **4.1.6**, whose Streamable HTTP API accepts the current
 `stateless_http=True` startup call; it declares support for Python 3.10+.
 Python 3.10 installs `tomli` as a conditional `tomllib` backport.
-Other dependencies currently have minimum versions rather than a full lock,
+The document transport uses HTTPX (at least 0.28.1 and below 1.0). FastMCP’s
+resolved MCP stack can use HTTPX2 independently. The project does not have a full lock,
 so fresh builds can resolve newer releases. Do not assume every release of
 these packages was tested. See [operations](operations.md#developer-tests-and-ci)
 for the exact offline checks.

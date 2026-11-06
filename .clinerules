@@ -8,7 +8,7 @@ workflow; it must not duplicate or override `DEVEL.md`.
    branch, `git status`, the actual diff and relevant source. Preserve existing
    uncommitted work. Verify claimed changes and test results independently.
 2. Check for missing requirements, functional regressions, unsafe behaviour and
-   unintended changes to the two-tool MCP interface. Review against current
+   unintended changes to the three-tool MCP interface. Review against current
    code and `DEVEL.md`, not against the handover's claims alone.
 3. Correct confirmed problems with the smallest change. Follow existing patterns;
    do not add unrelated features, refactor for style, or introduce dependencies
