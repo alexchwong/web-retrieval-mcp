@@ -1,0 +1,99 @@
+name: MCP Smoke Test
+
+on:
+  push:
+    branches: [devel, main]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Live MCP smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Start Docker Compose
+        id: startup
+        timeout-minutes: 7
+        run: |
+          bash setup.sh
+          # Accept any HTTP response from /mcp for readiness. The probe
+          # below checks actual MCP initialization and tool registration.
+          for attempt in {1..30}; do
+            if curl -fsS --max-time 2 http://127.0.0.1:8888/ >/dev/null 2>&1 &&
+               curl -sS --max-time 2 http://127.0.0.1:8765/mcp >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::SearxNG or the MCP endpoint did not become ready"
+          exit 1
+
+      - name: Call all MCP tools
+        id: probe
+        env:
+          SMOKE_CHECK_W3C_PDF: "1"
+        run: bash scripts/smoke_mcp.sh 2>&1 | tee "$RUNNER_TEMP/mcp-smoke.log"
+
+      - name: Publish MCP results
+        if: ${{ always() }}
+        env:
+          STARTUP_OUTCOME: ${{ steps.startup.outcome }}
+          PROBE_OUTCOME: ${{ steps.probe.outcome }}
+        run: |
+          log="$RUNNER_TEMP/mcp-smoke.log"
+
+          result_row() {
+            local label="$1" check="$2" result="NOT RUN"
+            if [[ -f "$log" ]]; then
+              if grep -Fxq "PASS $check" "$log"; then
+                result=PASS
+              elif grep -q "^FAIL $check — " "$log"; then
+                result=FAIL
+              fi
+            fi
+            printf '| %s | %s |\n' "$label" "$result"
+          }
+
+          {
+            printf '### Live MCP smoke test\n\n'
+            printf '| Check | Result |\n| --- | --- |\n'
+            case "$STARTUP_OUTCOME" in
+              success) startup=PASS ;;
+              failure) startup=FAIL ;;
+              *) startup="NOT RUN" ;;
+            esac
+            printf '| Docker Compose startup | %s |\n' "$startup"
+            if [[ "$PROBE_OUTCOME" == failure ]] &&
+               { [[ ! -f "$log" ]] || ! grep -Fxq 'PASS MCP tool registration' "$log"; }; then
+              printf '| MCP connection and registration | FAIL |\n'
+            else
+              result_row 'MCP connection and registration' 'MCP tool registration'
+            fi
+            result_row 'web_search_results' 'web_search_results'
+            result_row 'web_evidence_passages (web search)' 'web_evidence_passages'
+            result_row 'web_evidence_passages (supplied URLs)' 'web_evidence_passages_urls'
+            result_row 'web_page_text (HTML)' 'web_page_text'
+            result_row 'web_page_text (W3C PDF)' 'web_page_text_pdf'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show Docker Compose diagnostics
+        if: ${{ failure() && steps.startup.outcome != 'skipped' }}
+        run: |
+          docker compose ps -a || true
+          docker compose logs --no-color --tail=100 || true
+
+      - name: Stop Docker Compose
+        if: ${{ always() && steps.startup.outcome != 'skipped' }}
+        run: |
+          if [[ -f .env ]]; then
+            docker compose down --remove-orphans
+          fi

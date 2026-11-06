@@ -13,7 +13,7 @@ esac
 
 docker compose exec -T web-retrieval python - "$tool" \
     "${SMOKE_QUERY:-IANA example domains}" \
-    "${SMOKE_URL:-https://example.com/}" <<'PY'
+    "${SMOKE_URL:-https://example.com/}" "${SMOKE_CHECK_W3C_PDF:-0}" <<'PY'
 import asyncio
 import os
 import sys
@@ -25,7 +25,8 @@ for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
     os.environ.pop(name, None)
     os.environ.pop(name.lower(), None)
 
-selected, query, url = sys.argv[1:]
+selected, query, url, check_w3c_pdf = sys.argv[1:]
+w3c_pdf_url = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
 expected = ("web_search_results", "web_evidence_passages", "web_page_text")
 
 
@@ -86,12 +87,16 @@ async def check(client, tool):
             "passages do not link to fetched sources",
         )
     else:
-        data = await call(client, tool, {"url": url})
+        pdf = tool == "web_page_text_pdf"
+        data = await call(client, "web_page_text", {"url": w3c_pdf_url if pdf else url})
         require(data.get("status") == "complete" and data.get("fetch_status") == "fetched",
                 f"status={data.get('status')} fetch_status={data.get('fetch_status')}")
         require(data.get("text") and data.get("chars") == len(data["text"])
                 and data.get("origin") in {"fetched_page", "fetched_pdf"},
                 "missing text or inconsistent extraction metadata")
+        if pdf:
+            require(data.get("origin") == "fetched_pdf", "expected PDF extraction")
+            require("Dummy PDF file" in data["text"], "expected W3C PDF text missing")
 
 
 async def run():
@@ -102,6 +107,8 @@ async def run():
         failed = False
         checks = ("web_search_results", "web_evidence_passages",
                   "web_evidence_passages_urls", "web_page_text")
+        if check_w3c_pdf == "1":
+            checks += ("web_page_text_pdf",)
         for tool in checks if selected == "all" else (selected,):
             try:
                 await asyncio.wait_for(check(client, tool), timeout=60)
@@ -116,7 +123,7 @@ async def run():
 
 async def main():
     try:
-        return await asyncio.wait_for(run(), timeout=275)
+        return await asyncio.wait_for(run(), timeout=335 if check_w3c_pdf == "1" else 275)
     except Exception as exc:
         detail = str(exc) if isinstance(exc, ProbeFailure) else type(exc).__name__
         print(f"FAIL MCP connection or registration — {detail}", file=sys.stderr)
