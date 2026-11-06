@@ -2,6 +2,8 @@
 
 Read this file before changing the repository. Keep this project small: it is a two-tool, local-first MCP server, not a general agent framework.
 
+`.clinerules` contains only Cline's coding-agent handover-review checklist; it must not duplicate or override these general rules.
+
 ## Scope and workflow
 
 - Inspect the current branch, working tree, and relevant code before editing. Preserve uncommitted work.
@@ -39,4 +41,4 @@ python -m unittest discover -s web-retrieval -p 'test_*.py' -v
 - `README.md` is for installation and basic use; `docs/` owns detailed configuration, clients, operations, and security; `NEWS.md` records concise user-visible changes. Update the relevant document when behaviour changes.
 - `release/VERSION` is the single release version (currently `0.1.0`). Use `X.Y.Z` and add a corresponding `NEWS.md` entry when preparing a new release.
 - The installable ZIP is defined by `release/files.txt` and created by `.github/workflows/release.yml` on `main`, following the NEL-style process. Changes to an already published release's bundled files require a version bump; never overwrite a published release.
-- `DEVEL.md` is a developer instruction file, not part of the current installable ZIP. Changes to developer instructions alone do not require a release.
+- `DEVEL.md` and `.clinerules` are developer-only instructions, not part of the current installable ZIP. Changes to those instructions alone do not require a release.

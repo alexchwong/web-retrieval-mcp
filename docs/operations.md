@@ -103,19 +103,15 @@ Avoid broad Docker prune commands just to uninstall this service.
 
 ## Developer tests and CI
 
-CI runs on pushes/PRs targeting **`devel` or `main`** and supports a four-way
-matrix: **Linux/macOS × Python 3.10/3.13**. For a local offline test run,
-install the dependencies in an isolated environment and use:
+Developer setup, required commands and maintenance rules are in
+[DEVEL.md](../DEVEL.md). Cline's separate handover-review checklist is in the
+repository-root `.clinerules`; it does not replace `DEVEL.md`.
 
-```bash
-python -m pip install -r web-retrieval/requirements.txt
-python -m compileall -q web-retrieval
-python -m unittest discover -s web-retrieval -p 'test_*.py' -v
-```
-
-The offline tests check settings validation and reload, MCP registration and
-basic stateless route construction; they do **not** require SearxNG/network
-access. They are not a replacement for the Docker connectivity check above.
+CI runs on pushes/PRs targeting **`devel` or `main`** with a four-way matrix:
+**Linux/macOS × Python 3.10/3.13**. Its offline checks cover settings
+validation and reload, MCP tool registration and stateless route construction.
+They do **not** require SearxNG or external websites and do not replace the
+optional Docker connectivity check above.
 
 ## Creating a release
 

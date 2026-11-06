@@ -20,7 +20,7 @@ use WSL2 with Docker access.
 1. Open the [GitHub Releases](https://github.com/alexchwong/web-retrieval-mcp/releases)
    page and download the **attached** `web-retrieval-mcp-0.1.0.zip` asset for
    this version (not GitHub's automatically generated source-code ZIP).
-2. Extract it, open a terminal in the extracted directory, and run:
+2. From the directory containing the downloaded ZIP, run:
 
    ```bash
    unzip web-retrieval-mcp-0.1.0.zip
@@ -28,8 +28,8 @@ use WSL2 with Docker access.
    ./setup.sh
    ```
 
-   If you extracted the ZIP using a graphical file manager, skip `unzip` and
-   `cd` and run `./setup.sh` from the extracted project folder.
+   If you extracted the ZIP using a graphical file manager, open a terminal
+   in the extracted `web-retrieval-mcp-0.1.0` folder and run `./setup.sh`.
 
 `setup.sh` generates a local `.env` containing a SearxNG secret on the first
 run and starts the two-container Compose stack. Re-running it preserves the
@@ -94,5 +94,6 @@ chunks with BM25 and returns at most two passages per URL. See
 - [Operations, releases and troubleshooting](docs/operations.md)
 - [Security and privacy](docs/security.md)
 - [Changes](NEWS.md)
+- [Development rules](DEVEL.md)
 
 Not affiliated with SearxNG, llama.cpp or any MCP client vendor.
