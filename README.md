@@ -1,8 +1,8 @@
 # web-retrieval-mcp
 
-A small, local-first **web research MCP server** for AI clients that support
-**Streamable HTTP**. It searches with SearxNG, retrieves HTML/PDF text, and
-returns ranked passages with source URLs. No paid search API or API key is needed.
+**Version 0.1.0.** A small, local-first web research MCP server for AI clients
+supporting **Streamable HTTP**. It uses SearxNG search, extracts HTML/PDF text,
+and returns BM25-ranked passages with source URLs. No paid search API is needed.
 
 ```text
 AI client -- Streamable HTTP --> web-retrieval -- search --> SearxNG --> web
@@ -11,69 +11,88 @@ AI client -- Streamable HTTP --> web-retrieval -- search --> SearxNG --> web
                                   +-- chunk and BM25-rank passages
 ```
 
-## Quickstart
+## Install from a GitHub release ZIP (recommended)
 
-Requires **Git, Bash, OpenSSL, Docker and Docker Compose**. Docker must be
-running, and the first build needs internet access to pull images and Python
-packages. On Windows, use a suitable Bash/WSL2 environment with Docker access.
+Requires **Bash, OpenSSL, unzip (or a ZIP extractor), Docker and Docker Compose**. Docker must be running;
+the first setup needs internet access for images and Python packages. On Windows,
+use WSL2 with Docker access.
+
+1. Open the [GitHub Releases](https://github.com/alexchwong/web-retrieval-mcp/releases)
+   page and download the **attached** `web-retrieval-mcp-0.1.0.zip` asset for
+   this version (not GitHub's automatically generated source-code ZIP).
+2. Extract it, open a terminal in the extracted directory, and run:
+
+   ```bash
+   unzip web-retrieval-mcp-0.1.0.zip
+   cd web-retrieval-mcp-0.1.0
+   ./setup.sh
+   ```
+
+   If you extracted the ZIP using a graphical file manager, skip `unzip` and
+   `cd` and run `./setup.sh` from the extracted project folder.
+
+`setup.sh` generates a local `.env` containing a SearxNG secret on the first
+run and starts the two-container Compose stack. Re-running it preserves the
+existing `.env`. See [operations](docs/operations.md) for updates and removal.
+
+### Alternative: clone the development branch
+
+Requires **Git** in addition to the above prerequisites:
 
 ```bash
-git clone https://github.com/alexchwong/web-retrieval-mcp.git
+git clone --branch devel https://github.com/alexchwong/web-retrieval-mcp.git
 cd web-retrieval-mcp
 ./setup.sh
 ```
 
-`setup.sh` creates a private `.env` with a random SearxNG secret on first run;
-later runs preserve it. It then starts the two-container Compose stack.
+Version numbers are recorded in [`release/VERSION`](release/VERSION) and
+[`NEWS.md`](NEWS.md). Merges into `main` publish a versioned release ZIP when
+this version has not already been released. Published releases are immutable;
+a change to bundled files requires a version bump.
 
-With the shipped defaults:
+## Verify and connect
 
-- **MCP endpoint:** `http://127.0.0.1:8765/mcp` (no trailing slash)
+Default addresses:
+
+- **MCP:** `http://127.0.0.1:8765/mcp` (no trailing slash)
 - **SearxNG:** `http://127.0.0.1:8888`
 
-Check the services with `docker compose ps`. Then run the **[pass/fail connection
-checks](docs/operations.md#verify-the-installation)** to confirm that SearxNG
-answers and MCP advertises both tools. Initial SearxNG startup may take a moment.
+Check service status with `docker compose ps`, then run the
+[pass/fail connection checks](docs/operations.md#verify-the-installation).
+Initial SearxNG startup can take a moment.
 
-## Connect an AI client
-
-Configure a **Streamable HTTP** MCP server whose URL is
-`http://127.0.0.1:8765/mcp`. The endpoint is shared, but **client configuration
-formats differ** (some use `servers`, others `mcpServers`, and some use a UI).
-See [client-specific examples](docs/clients.md) for Cline, VS Code, Cursor,
-LM Studio, Claude Code and llama.cpp WebUI.
-
-The URL must be reachable **from the client process**: `127.0.0.1` inside a
-separate container or remote machine is not your host computer.
+In your AI client, configure a **Streamable HTTP** MCP server at
+`http://127.0.0.1:8765/mcp`. Client configurations differ: see
+[examples for Cline, VS Code, Cursor, LM Studio, Claude Code and llama.cpp](docs/clients.md).
+`127.0.0.1` in a separate container or on another device is **not** your host.
 
 ## Tools
 
 | Tool | Use |
 |---|---|
-| `search_web(query, max_passages=None)` | Discover sources and obtain short BM25-ranked passages. Default **8** returned passages requested, configurable maximum **20**; actual count may be lower. |
-| `read_url(url)` | Fetch **one** HTML/PDF URL and return a **capped** text extract (default maximum 40,000 characters and 40 PDF pages). |
+| `search_web(query, max_passages=None)` | Find and rank short source passages (default 8 requested, maximum 20; actual results may be fewer). |
+| `read_url(url)` | Extract text from one HTML/PDF URL (default maximum 40,000 characters and 40 PDF pages). |
 
-`search_web` considers up to eight search-result URLs by default, downloads
-eligible pages concurrently, chunks them (default 350 words with 50-word
-overlap), and limits returned passages from any one source (default two).
-`read_url` is for fuller inspection of a known URL, **not** unrestricted
-full-document access. See [configuration and tool limits](docs/configuration.md).
+Search examines up to eight result URLs by default, ranks roughly 350-word
+chunks with BM25 and returns at most two passages per URL. See
+[configuration and tool contracts](docs/configuration.md).
 
 ## Configuration and safety
 
-- `.env`: host ports/bind addresses and SearxNG secret; changing Compose
-  settings generally requires **recreating** containers.
-- `web-retrieval/settings.toml`: search, fetch, chunking and ranking options;
-  changes are **checked** on each tool call (with [reload caveats](docs/configuration.md#live-reload)).
-- **Keep this service local/private.** It has **no authentication** and
-  `read_url` does **not** prevent requests to internal network addresses.
-  Do not expose port 8765 publicly. Read [security](docs/security.md).
+- `.env` controls host ports and SearxNG secrets; Compose changes generally
+  require recreating containers.
+- `web-retrieval/settings.toml` controls search, fetch and ranking behaviour;
+  edits are checked at each call with [known reload caveats](docs/configuration.md#live-reload).
+- **Private/local use only.** There is no MCP authentication, and `read_url`
+  does not block internal network addresses. Do not publicly expose port 8765.
+  Review [security](docs/security.md) before changing network access.
 
-## Reference
+## Documentation
 
 - [Client setup](docs/clients.md)
 - [Configuration and tool contracts](docs/configuration.md)
-- [Operations, verification and troubleshooting](docs/operations.md)
+- [Operations, releases and troubleshooting](docs/operations.md)
 - [Security and privacy](docs/security.md)
+- [Changes](NEWS.md)
 
-This project is not affiliated with SearxNG, llama.cpp or any MCP client vendor.
+Not affiliated with SearxNG, llama.cpp or any MCP client vendor.

@@ -117,16 +117,18 @@ starts the full Compose stack and `web-retrieval` declares a dependency on
 provided by the current script. Do not assume `localhost` inside the MCP
 container refers to a host-based SearxNG instance.
 
-## Dependencies
+## Dependencies and supported Python versions
 
-The Dockerfile uses Python **3.12**. `requirements.txt` currently specifies
-`fastmcp>=2.10.0` with no upper bound. The server's startup call with
-`stateless_http=True` is accepted by verified **2.10.2**, **2.14.7** and
-**4.1.6**, but **not** by 2.10.0 or 2.10.1. This is a known incorrect declared
-lower bound, **not a claim that every intervening release was tested**. A
-separate code/dependency change should choose and test a reproducible version
-constraint; this documentation refactor intentionally leaves it untouched.
+The Dockerfile uses **Python 3.12**. CI tests **Python 3.10 and 3.13** on
+Linux and macOS, installing dependencies from
+[`web-retrieval/requirements.txt`](../web-retrieval/requirements.txt). FastMCP
+is pinned to **4.1.6**, whose Streamable HTTP API accepts the current
+`stateless_http=True` startup call; it declares support for Python 3.10+.
+Python 3.10 installs `tomli` as a conditional `tomllib` backport.
+Other dependencies currently have minimum versions rather than a full lock,
+so fresh builds can resolve newer releases. Do not assume every release of
+these packages was tested. See [operations](operations.md#developer-tests-and-ci)
+for the exact offline checks.
 
-Source: [FastMCP 2.10.0](https://github.com/PrefectHQ/fastmcp/blob/v2.10.0/src/fastmcp/server/server.py#L1361-L1371),
-[2.10.2](https://github.com/PrefectHQ/fastmcp/blob/v2.10.2/src/fastmcp/server/server.py#L1361-L1397),
-[4.1.6](https://github.com/PrefectHQ/fastmcp/blob/v4.1.6/fastmcp_slim/fastmcp/server/mixins/transport.py#L253-L269).
+Sources: [FastMCP 4.1.6 transport](https://github.com/PrefectHQ/fastmcp/blob/v4.1.6/fastmcp_slim/fastmcp/server/mixins/transport.py#L253-L269),
+[PyPI Python requirement](https://pypi.org/project/fastmcp/4.1.6/).

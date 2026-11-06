@@ -1,6 +1,7 @@
 """Tests for validated settings loading and last-known-good live reload."""
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,18 +38,28 @@ class SettingsTests(unittest.TestCase):
             )
             manager = SettingsManager(path)
 
-            path.write_text(
-                "[ranking]\ndefault_max_passages = 7\nmax_passages = 12\n",
-                encoding="utf-8",
+            def write_new_revision(content: str) -> None:
+                # The runtime deliberately detects edits by (mtime_ns, size).
+                # Advance the timestamp explicitly so fast CI file writes are
+                # observable on filesystems with coarse or cached timestamps.
+                previous_mtime = path.stat().st_mtime_ns
+                path.write_text(content, encoding="utf-8")
+                current = path.stat()
+                os.utime(
+                    path,
+                    ns=(current.st_atime_ns, max(previous_mtime, current.st_mtime_ns) + 1_000_000_000),
+                )
+
+            write_new_revision(
+                "[ranking]\ndefault_max_passages = 7\nmax_passages = 12\n"
             )
             self.assertEqual(manager.get().ranking.default_max_passages, 7)
 
-            path.write_text("[ranking\ninvalid", encoding="utf-8")
+            write_new_revision("[ranking\ninvalid")
             self.assertEqual(manager.get().ranking.default_max_passages, 7)
 
-            path.write_text(
-                "[ranking]\ndefault_max_passages = 9\nmax_passages = 12\n",
-                encoding="utf-8",
+            write_new_revision(
+                "[ranking]\ndefault_max_passages = 9\nmax_passages = 12\n"
             )
             self.assertEqual(manager.get().ranking.default_max_passages, 9)
 

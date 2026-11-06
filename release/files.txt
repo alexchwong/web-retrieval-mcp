@@ -1,0 +1,11 @@
+.env.example
+README.md
+NEWS.md
+setup.sh
+docker-compose.yml
+docker-compose.yml.example
+docs/
+searxng/
+web-retrieval/
+release/VERSION
+release/files.txt

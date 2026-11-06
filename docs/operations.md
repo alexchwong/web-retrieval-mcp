@@ -4,31 +4,43 @@
 
 Run commands from the repository root unless otherwise stated.
 
-## Start, stop, logs, update
+## Start, stop, logs and update
 
 ```bash
 ./setup.sh                              # create .env if missing; build/start stack
 docker compose ps                       # service status and published ports
 docker compose logs --tail=80 searxng   # SearxNG startup/search errors
 docker compose logs --tail=80 web-retrieval
-docker compose down                     # stop/remove containers, keep local files
+docker compose down                     # stop/remove containers; keep local files
 ```
 
-To start again with the existing `.env`: `docker compose up -d`. To rebuild
-Python dependencies after updating source: `docker compose up -d --build`.
-To fetch a newer SearxNG image (the Compose file defaults to `latest`), run
+Start again with the existing `.env` using `docker compose up -d`. Rebuild
+Python dependencies after updating source with `docker compose up -d --build`.
+To pull a newer SearxNG image (Compose defaults to `latest`), run
 `docker compose pull searxng` before `docker compose up -d --build`.
 
-For a source update on an ordinary clone, review local changes first with
-`git status`; then use your usual `git pull` process followed by
-`docker compose up -d --build`. **No automatic dependency lock is supplied**:
-a rebuild at a later date can resolve different Python package versions.
+**GitHub release ZIP installations:** download a **new** attached versioned ZIP
+from [Releases](https://github.com/alexchwong/web-retrieval-mcp/releases),
+extract into a new directory, and copy your previous `.env` and any custom
+`web-retrieval/settings.toml` changes into the new folder before running
+`./setup.sh`. Do not overwrite newly released defaults without checking your
+changes. Stop the old stack with `docker compose down` from its old directory
+before starting the new one, to avoid host-port conflicts. The two folders
+should not be run at the same time with default ports.
+
+**Git clone installations:** inspect local modifications with `git status`,
+then update with your normal `git pull` procedure and run
+`docker compose up -d --build`.
+
+There is no complete Python dependency lockfile: rebuilds can resolve newer
+versions of dependencies other than the pinned FastMCP. `setup.sh` keeps your
+existing secret, while the packaged `.env.example` does not contain one.
 
 ## Verify the installation
 
-There is no `/health` endpoint in this version. These checks do not require
-installing Python or MCP packages on the **host**; they use Python and FastMCP
-already in the `web-retrieval` container. They verify two independent layers:
+There is no `/health` endpoint in version 0.1.0. The following checks do not
+require Python or MCP packages on the **host**: they use the container's Python
+and FastMCP environment. They verify independent layers:
 
 1. Confirm both containers are running with `docker compose ps`.
 2. Run the following from the repository root:
@@ -60,53 +72,72 @@ asyncio.run(check())
 PY
 ```
 
-Expect **two `PASS` lines and exit code 0**. An exception or assertion means
-at least one layer has not passed. This checks service connectivity and MCP
-discovery, **not** whether upstream web search engines will return useful
-results, whether PDFs extract properly, or whether any particular AI client
-can connect. Run one real tool call from your client after this test.
-
-If you changed default addresses or provided an external SearxNG instance,
-adapt the check URLs. The SearxNG URL in this check refers to the **bundled
-service**, not whatever `search.searxng_url` might point to.
+Expect **two `PASS` lines and exit code 0**. An exception or assertion is a
+failure. These tests do not verify upstream search quality, PDF extraction
+accuracy or individual AI clients. After they pass, make one live tool call
+from your client. If using an external SearxNG instance, adjust the SearxNG
+check to that server's URL.
 
 ## Troubleshooting
 
 | Symptom | First check / action |
 |---|---|
-| `docker compose` not available | Install Docker Compose plugin; Docker daemon must be running. |
-| `SEARXNG_SECRET` missing | Run `./setup.sh`; inspect `.env` locally without pasting secrets into logs or issues. |
-| Port 8765 or 8888 is already in use | Change host ports in `.env`, then `docker compose up -d` to recreate containers. Update client URLs. |
-| MCP connection fails / no tools listed | Use `/mcp` **without** a trailing slash; check `docker compose logs web-retrieval`; ensure the client can reach the URL from its own process/network. |
-| Browser reports CORS | Check whether the client supports a local HTTP proxy. CORS is not solved by adding `/mcp/` or opening the port to the internet. |
-| `search_web` reports `searxng unreachable` | Inspect `docker compose logs searxng` and try the SearxNG half of the verification; allow startup time. |
-| Search returns no passages but some sources | Upstream websites may block fetches, require JavaScript or return unsupported formats; sources may contain only search snippets. |
-| Search gives empty results | Check SearxNG JSON output and logs; upstream engines may rate-limit the host or change behavior. |
-| PDF returns empty text | Scanned/image-only PDFs need OCR, which is **not** implemented; PDF can also be malformed or encrypted. |
-| TOML change seems ignored | Inspect MCP logs for validation failure; timestamp-plus-size fingerprint can miss a rapid same-size edit. Save again or restart the MCP container. |
-| Dockerized client cannot use `localhost` | `localhost` means the **client container**. Put it on the same Compose network and use `web-retrieval:8765`, or design a secure, tested network path. |
+| `docker compose` unavailable | Install Docker Compose plugin and start the Docker daemon. |
+| `SEARXNG_SECRET` missing | Run `./setup.sh`; do not paste `.env` secrets into logs or issues. |
+| Port 8765 or 8888 in use | Stop the previous stack or change host ports in `.env`, then `docker compose up -d`. |
+| MCP connection fails / tools missing | Use `/mcp` without a trailing slash; inspect `docker compose logs web-retrieval`; check the client's network path. |
+| Browser reports CORS | Check client/proxy support. Opening the port publicly does not solve CORS safely. |
+| `searxng unreachable` | Inspect SearxNG logs, verify JSON search and allow startup time. |
+| Sources but no passages | Fetches may be blocked or require JavaScript; snippets can exist without extracted pages. |
+| Empty search results | Check SearxNG JSON output/logs and possible upstream engine rate limits. |
+| Blank PDF output | Scanned PDFs require OCR, which is not implemented. Malformed/encrypted PDFs can also fail. |
+| TOML edit ignored | Look for validation errors. A same-size edit with an unchanged timestamp may go unnoticed; save again/restart. |
+| Container client cannot use `localhost` | Join the client's container to the Compose network and use `web-retrieval:8765` or configure a private network path. |
 
 ## Uninstall and local files
 
-`docker compose down` removes the containers and the Compose network; the
-project's `.env` and committed configuration files remain on disk. If you
-choose to remove the local project directory afterward, back up any edited
-`settings.toml` and `.env` values you want to retain. This stack has no
-application database, index or cache to migrate. Removing downloaded images
-is a separate Docker maintenance decision; do not use aggressive Docker prune
-commands merely to uninstall this project.
+`docker compose down` removes containers and network, preserving `.env` and
+configuration on disk. Back up any custom settings before deleting the old
+installation folder. There is no application database or index to migrate.
+Avoid broad Docker prune commands just to uninstall this service.
 
-## Developer test
+## Developer tests and CI
 
-The repository includes a settings-only unittest module, not a full MCP
-integration suite. With Python **3.11+** on a development machine:
+CI runs on pushes/PRs targeting **`devel` or `main`** and supports a four-way
+matrix: **Linux/macOS × Python 3.10/3.13**. For a local offline test run,
+install the dependencies in an isolated environment and use:
 
 ```bash
-cd web-retrieval
-python -m unittest -v test_settings
+python -m pip install -r web-retrieval/requirements.txt
+python -m compileall -q web-retrieval
+python -m unittest discover -s web-retrieval -p 'test_*.py' -v
 ```
 
-A reported rapid-edit timing issue can make the live-reload test fail on some
-filesystems; that is a **runtime maintenance issue**, not proof that the docs
-or the MCP transport are wrong. Client examples in [clients.md](clients.md)
-were checked against vendor docs but not executed end-to-end in this change.
+The offline tests check settings validation and reload, MCP registration and
+basic stateless route construction; they do **not** require SearxNG/network
+access. They are not a replacement for the Docker connectivity check above.
+
+## Creating a release
+
+Version control follows NEL's small release convention:
+
+1. Develop and test on **`devel`**; update `release/VERSION` to the next `X.Y.Z`
+   version and add its change notes to `NEWS.md` before merging to `main`.
+2. CI must pass on the PR. Merge to **`main`**.
+3. The [release workflow](https://github.com/alexchwong/web-retrieval-mcp/blob/main/.github/workflows/release.yml) validates the
+   version and payload, runs offline tests, builds `web-retrieval-mcp-X.Y.Z.zip`
+   containing the installable project files, checks its members, and publishes
+   the asset on the GitHub release tagged **`vX.Y.Z`**.
+4. If this version already exists, publishing is skipped if the release files
+   are unchanged. Changed release files without a version bump **fail** rather
+   than overwriting the existing GitHub release.
+
+The release archive contains only tracked files listed in
+[`release/files.txt`](../release/files.txt). It includes Compose, templates,
+source, tests, documentation, `setup.sh` and version metadata, but **not**
+`.env` secrets or GitHub workflow files. `workflow_dispatch` can run the release
+workflow manually; it still releases the current `main` commit, not `devel`.
+
+**Release caveat:** A GitHub release is only available after the files have
+been committed/merged into `main` and its release workflow has succeeded.
+The local `devel` branch alone does not create a release asset.

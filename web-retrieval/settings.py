@@ -4,7 +4,10 @@ from __future__ import annotations
 import logging
 import os
 import threading
-import tomllib
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:
+    import tomli as tomllib  # Python 3.10 backport
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TypeVar
@@ -107,7 +110,9 @@ def load_settings(path: Path) -> Settings:
         timeout_seconds=_value(
             fetch_data, "timeout_seconds", DEFAULT_SETTINGS.fetch.timeout_seconds, float
         ),
-        max_bytes=_value(fetch_data, "max_bytes", DEFAULT_SETTINGS.fetch.max_bytes, int),
+        max_bytes=_value(
+            fetch_data, "max_bytes", DEFAULT_SETTINGS.fetch.max_bytes, int
+        ),
         max_document_chars=_value(
             fetch_data,
             "max_document_chars",
@@ -125,10 +130,7 @@ def load_settings(path: Path) -> Settings:
     )
     ranking = RankingSettings(
         default_max_passages=_value(
-            ranking_data,
-            "default_max_passages",
-            DEFAULT_SETTINGS.ranking.default_max_passages,
-            int,
+            ranking_data, "default_max_passages", DEFAULT_SETTINGS.ranking.default_max_passages, int
         ),
         max_passages=_value(
             ranking_data, "max_passages", DEFAULT_SETTINGS.ranking.max_passages, int
