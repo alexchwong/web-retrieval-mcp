@@ -13,8 +13,10 @@ esac
 
 docker compose exec -T web-retrieval python - "$tool" \
     "${SMOKE_QUERY:-IANA example domains}" \
-    "${SMOKE_URL:-https://example.com/}" "${SMOKE_CHECK_W3C_PDF:-0}" <<'PY'
+    "${SMOKE_URL:-https://example.com/}" "${SMOKE_CHECK_W3C_PDF:-0}" \
+    "${SMOKE_LOG_RESPONSES:-0}" <<'PY'
 import asyncio
+import json
 import os
 import sys
 
@@ -25,7 +27,7 @@ for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
     os.environ.pop(name, None)
     os.environ.pop(name.lower(), None)
 
-selected, query, url, check_w3c_pdf = sys.argv[1:]
+selected, query, url, check_w3c_pdf, log_responses = sys.argv[1:]
 w3c_pdf_url = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
 expected = ("web_search_results", "web_evidence_passages", "web_page_text")
 
@@ -39,10 +41,18 @@ def require(condition, message):
         raise ProbeFailure(message)
 
 
-async def call(client, tool, args):
+async def call(client, tool, args, *, label=None):
     result = await client.call_tool(tool, args, raise_on_error=False)
-    require(not result.is_error, "MCP tool error")
     payload = result.structured_content
+    if log_responses == "1":
+        body = payload
+        if result.is_error or body is None:
+            body = [block.model_dump(mode="json") for block in result.content]
+        print(f"MCP response for {label or tool} (is_error={result.is_error})", flush=True)
+        # Keep external text escaped and prefix every line in the Actions log.
+        for line in json.dumps(body, indent=2, ensure_ascii=True).splitlines():
+            print(f"  | {line}", flush=True)
+    require(not result.is_error, "MCP tool error")
     require(isinstance(payload, dict), "missing structured result")
     return payload
 
@@ -65,7 +75,7 @@ async def check(client, tool):
         args = {"query": query, "max_passages": 2}
         if supplied:
             args["urls"] = [url]
-        data = await call(client, "web_evidence_passages", args)
+        data = await call(client, "web_evidence_passages", args, label=tool)
         require(data.get("mode") == ("supplied_urls" if supplied else "web_search"),
                 "wrong evidence mode")
         if supplied:
@@ -88,7 +98,9 @@ async def check(client, tool):
         )
     else:
         pdf = tool == "web_page_text_pdf"
-        data = await call(client, "web_page_text", {"url": w3c_pdf_url if pdf else url})
+        data = await call(
+            client, "web_page_text", {"url": w3c_pdf_url if pdf else url}, label=tool
+        )
         require(data.get("status") == "complete" and data.get("fetch_status") == "fetched",
                 f"status={data.get('status')} fetch_status={data.get('fetch_status')}")
         require(data.get("text") and data.get("chars") == len(data["text"])

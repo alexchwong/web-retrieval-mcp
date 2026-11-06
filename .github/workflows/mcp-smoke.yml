@@ -41,6 +41,7 @@ jobs:
         id: probe
         env:
           SMOKE_CHECK_W3C_PDF: "1"
+          SMOKE_LOG_RESPONSES: "1"
         run: bash scripts/smoke_mcp.sh 2>&1 | tee "$RUNNER_TEMP/mcp-smoke.log"
 
       - name: Publish MCP results
