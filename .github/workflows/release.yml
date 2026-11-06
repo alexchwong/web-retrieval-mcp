@@ -1,0 +1,165 @@
+name: Release web-retrieval-mcp
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: web-retrieval-mcp-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Check release configuration
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < release/VERSION)"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'release/VERSION must contain X.Y.Z (for example 0.1.0)' >&2
+            exit 1
+          fi
+          test -s release/files.txt
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "archive_root=web-retrieval-mcp-$VERSION" >> "$GITHUB_OUTPUT"
+          echo "archive=web-retrieval-mcp-$VERSION.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version was released
+        id: existing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.config.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve exact release payload
+        id: payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolved="$RUNNER_TEMP/release-files.txt"
+          : > "$resolved"
+          while IFS= read -r path || [[ -n "$path" ]]; do
+            [[ -n "$path" ]] || continue
+            mapfile -t matches < <(git ls-files -- "$path")
+            if (( ${#matches[@]} == 0 )); then
+              echo "Release manifest path matched no tracked files: $path" >&2
+              exit 1
+            fi
+            for file in "${matches[@]}"; do
+              if [[ ! -f "$file" ]]; then
+                echo "Release manifest matched missing file: $file" >&2
+                exit 1
+              fi
+              printf '%s\n' "$file" >> "$resolved"
+            done
+          done < release/files.txt
+          sort -u -o "$resolved" "$resolved"
+          test -s "$resolved"
+          echo "RELEASE_FILES=$resolved" >> "$GITHUB_ENV"
+
+      - name: Require version bump when release content changes
+        if: steps.existing.outputs.exists == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.config.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          git rev-parse --verify "$TAG^{commit}" >/dev/null
+          mapfile -t paths < release/files.txt
+          # Changes to files included in the published ZIP require a new version.
+          if ! git diff --quiet "$TAG"..HEAD -- "${paths[@]}"; then
+            echo "Published $TAG has different release files. Bump release/VERSION." >&2
+            exit 1
+          fi
+          echo "Published $TAG is unchanged; skipping release."
+
+      - name: Install dependencies and run tests
+        if: steps.existing.outputs.exists != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r web-retrieval/requirements.txt
+          python -m compileall -q web-retrieval
+          python -m unittest discover -s web-retrieval -p 'test_*.py' -v
+
+      - name: Build release ZIP from tracked files
+        if: steps.existing.outputs.exists != 'true'
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.config.outputs.archive }}
+          ARCHIVE_ROOT: ${{ steps.config.outputs.archive_root }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < "$RELEASE_FILES"
+          git archive --format=zip --prefix="$ARCHIVE_ROOT/" \
+            --output="$ARCHIVE" HEAD -- "${files[@]}"
+
+      - name: Verify release ZIP contents
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          ARCHIVE: ${{ steps.config.outputs.archive }}
+          ARCHIVE_ROOT: ${{ steps.config.outputs.archive_root }}
+        run: |
+          python - <<'PY'
+          import os
+          import zipfile
+          from pathlib import Path
+
+          prefix = os.environ['ARCHIVE_ROOT'] + '/'
+          expected = {
+              prefix + p for p in Path(os.environ['RELEASE_FILES']).read_text().splitlines()
+              if p
+          }
+          with zipfile.ZipFile(os.environ['ARCHIVE']) as zf:
+              actual = {n for n in zf.namelist() if not n.endswith('/')}
+              bad = zf.testzip()
+          if bad or actual != expected:
+              raise SystemExit(
+                  f'Invalid release ZIP: bad={bad}; '
+                  f'missing={sorted(expected - actual)}; extra={sorted(actual - expected)}'
+              )
+          if any(name.endswith('/.env') for name in actual):
+              raise SystemExit('Refusing to release a local .env file')
+          print(f'PASS: verified {len(expected)} release files')
+          PY
+
+      - name: Publish GitHub release
+        if: steps.existing.outputs.exists != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.config.outputs.version }}
+          TAG: ${{ steps.config.outputs.tag }}
+          ARCHIVE: ${{ steps.config.outputs.archive }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" "$ARCHIVE#Installable ZIP" \
+            --target "$(git rev-parse HEAD)" \
+            --title "$VERSION" \
+            --generate-notes

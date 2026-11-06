@@ -1,0 +1,22 @@
+# Cline — coding-agent handover review
+
+`DEVEL.md` is the authority for development, testing, safety and release rules.
+Read it before reviewing changes. This file defines only Cline's handover-review
+workflow; it must not duplicate or override `DEVEL.md`.
+
+1. Read the owner's request and the other agent's handover. Check the current
+   branch, `git status`, the actual diff and relevant source. Preserve existing
+   uncommitted work. Verify claimed changes and test results independently.
+2. Check for missing requirements, functional regressions, unsafe behaviour and
+   unintended changes to the two-tool MCP interface. Review against current
+   code and `DEVEL.md`, not against the handover's claims alone.
+3. Correct confirmed problems with the smallest change. Follow existing patterns;
+   do not add unrelated features, refactor for style, or introduce dependencies
+   without owner approval. Do not extend the task beyond the agreed scope.
+4. Run applicable offline checks from `DEVEL.md` and focused tests for any
+   behaviour changed. Treat live Docker/search checks separately. Never weaken
+   a test to make it pass or claim unrun checks passed.
+5. Inspect the final diff and update the appropriate user documentation when
+   behaviour changes. Report corrections, reasons, checks passed/failed/blocked,
+   remaining risks and owner actions. Do not commit, push, merge, tag or release
+   unless explicitly authorized.
