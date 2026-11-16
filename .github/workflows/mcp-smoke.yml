@@ -44,11 +44,16 @@ jobs:
           SMOKE_LOG_RESPONSES: "1"
         run: bash scripts/smoke_mcp.sh 2>&1 | tee "$RUNNER_TEMP/mcp-smoke.log"
 
+      - name: Check the request guard
+        id: guard
+        run: bash scripts/guard_check.sh 2>&1 | tee "$RUNNER_TEMP/guard-check.log"
+
       - name: Publish MCP results
         if: ${{ always() }}
         env:
           STARTUP_OUTCOME: ${{ steps.startup.outcome }}
           PROBE_OUTCOME: ${{ steps.probe.outcome }}
+          GUARD_OUTCOME: ${{ steps.guard.outcome }}
         run: |
           log="$RUNNER_TEMP/mcp-smoke.log"
 
@@ -84,6 +89,12 @@ jobs:
             result_row 'web_evidence_passages (supplied URLs)' 'web_evidence_passages_urls'
             result_row 'web_page_text (HTML)' 'web_page_text'
             result_row 'web_page_text (W3C PDF)' 'web_page_text_pdf'
+            case "$GUARD_OUTCOME" in
+              success) guard=PASS ;;
+              failure) guard=FAIL ;;
+              *) guard="NOT RUN" ;;
+            esac
+            printf '| Host/Origin request guard | %s |\n' "$guard"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Show Docker Compose diagnostics

@@ -1,0 +1,12 @@
+# The image needs only what builds or installs the wheel.
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!webspell/
+!dist/webspell-*-py3-none-any.whl
+!docker/constraints.txt
+!docker/settings.toml
+**/__pycache__
+**/*.pyc

@@ -1,0 +1,34 @@
+# Reference copy of docker/settings.toml. Runtime changes apply on the next MCP tool call.
+
+[search]
+# Search is configured only on purpose: with no searxng_url both search paths
+# return search_not_configured. Inside Compose, SearXNG is the searxng service.
+searxng_url = "http://searxng:8080"
+num_results = 8
+timeout_seconds = 10.0
+language = "en"
+safesearch = 0
+
+[fetch]
+concurrency = 6
+timeout_seconds = 12.0
+max_bytes = 20000000
+max_document_chars = 40000
+max_pdf_pages = 40
+user_agent = "webSpell/0.2"
+
+[chunk]
+words = 350
+overlap = 50
+
+[ranking]
+default_max_passages = 8
+max_passages = 20
+max_passages_per_source = 2
+
+[output]
+# Unset means no result size limit (0.1.1 behaviour). When set (at least 4096),
+# every result fits in this many bytes as measured by webspell.result_bytes.
+# max_result_bytes = 65536
+# Set when the client serialises results as ASCII-only JSON.
+ascii_json = false

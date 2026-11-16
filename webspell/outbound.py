@@ -11,7 +11,8 @@ from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 import httpx
 
-from settings import FetchSettings
+from . import limits
+from .settings import FetchSettings
 
 _LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _NUMERIC = re.compile(r"(?:[0-9]+|0x[0-9a-f]+)(?:\.(?:[0-9]+|0x[0-9a-f]+))*", re.I)
@@ -120,7 +121,7 @@ async def resolve(host: str, port: int) -> list[str]:
     try:
         return [str(ip_address(host))]
     except ValueError:
-        records = await asyncio.get_running_loop().getaddrinfo(
+        records = await limits.getaddrinfo(
             host + ".", port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
         return list(dict.fromkeys(record[4][0] for record in records))
 

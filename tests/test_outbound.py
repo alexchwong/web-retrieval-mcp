@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-import outbound
-from settings import DEFAULT_SETTINGS
+from webspell import outbound
+from webspell.settings import DEFAULT_SETTINGS
 
 FIXTURES = Path(__file__).with_name("testdata")
 FETCH = DEFAULT_SETTINGS.fetch

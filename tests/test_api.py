@@ -1,28 +1,24 @@
-"""Offline MCP contracts, search filters, extraction and ranking."""
+"""0.1.1 offline contracts, moved onto the library API: search filters, outcomes,
+extraction and ranking. Assertions keep their 0.1.1 meaning (Section 15, test 1)."""
 import asyncio
 from dataclasses import replace
 from datetime import date
 import unittest
 from unittest.mock import AsyncMock, patch
 
-import httpx
-import pymupdf
+from webspell import api, extract, outbound, rank, search
+from webspell.extract import Document
+from webspell.settings import DEFAULT_SETTINGS
 
-import outbound
-import server
-from settings import DEFAULT_SETTINGS
+from tests.helpers import LoopbackServer, settings
+
+# Search is opt-in in 0.2.0; tests that patch the client still need it configured.
+CONFIGURED = settings(search={"searxng_url": "http://127.0.0.1:9"})
 
 
-class ServerTests(unittest.IsolatedAsyncioTestCase):
-    async def call(self, tool, **arguments):
-        result = await server.mcp.call_tool(tool, arguments)
-        self.assertFalse(result.is_error, str(result))
-        return result.structured_content
-
-    async def test_expected_mcp_tools_registered(self):
-        tools = await server.mcp.list_tools()
-        self.assertEqual({tool.name for tool in tools},
-                         {"web_search_results", "web_evidence_passages", "web_page_text"})
+class ApiTests(unittest.IsolatedAsyncioTestCase):
+    async def call(self, tool, settings=CONFIGURED, **arguments):
+        return await api.run_tool(tool, arguments, settings)
 
     async def test_page_text_invalid_and_blocked(self):
         result = await self.call("web_page_text", url="file:///etc/passwd")
@@ -31,10 +27,6 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         result = await self.call("web_page_text", url="https://user:secret@example.org/")
         self.assertEqual(result["fetch_status"], "blocked")
         self.assertEqual(result["url"], "https://example.org/")
-
-    def test_stateless_http_exposes_mcp_path(self):
-        app = server.mcp.http_app(transport="streamable-http", stateless_http=True)
-        self.assertIn("/mcp", {getattr(route, "path", None) for route in app.routes})
 
     def test_recency_and_domain_validation(self):
         cases = [
@@ -50,19 +42,19 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         ]
         for value, window, method, cutoff in cases:
             with self.subTest(value=value):
-                search = server._search_input("query", value, [" Faß.DE. "], date(2024, 3, 31))
-                self.assertEqual(search.query, "query site:xn--fa-hia.de")
-                self.assertEqual(search.metadata["time_range"], window)
-                self.assertEqual(search.metadata["recency_method"], method)
-                self.assertEqual(search.metadata["cutoff_utc"], cutoff)
+                query = search.search_input("query", value, [" Faß.DE. "], date(2024, 3, 31))
+                self.assertEqual(query.query, "query site:xn--fa-hia.de")
+                self.assertEqual(query.metadata["time_range"], window)
+                self.assertEqual(query.metadata["recency_method"], method)
+                self.assertEqual(query.metadata["cutoff_utc"], cutoff)
         for value in ("01w", "0w", "366d", "53w", "6y", "61m", "١w", "1W"):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                server._search_input("query", value, None, date(2024, 2, 29))
+                search.search_input("query", value, None, date(2024, 2, 29))
         for value in ("%77ho.int", "exa mple.com", "x_y.example.org", "1.2.3.4", "who.int.."):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                server._search_input("query", None, [value], date(2024, 2, 29))
-        search = server._search_input("query", "1y", None, date(2024, 2, 29))
-        self.assertEqual(search.metadata["cutoff_utc"], "2023-02-28")
+                search.search_input("query", None, [value], date(2024, 2, 29))
+        query = search.search_input("query", "1y", None, date(2024, 2, 29))
+        self.assertEqual(query.metadata["cutoff_utc"], "2023-02-28")
 
     async def test_discovery_filters_without_fetch_or_dns(self):
         payload = {"results": [
@@ -74,21 +66,15 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             {"url": "https://sub.example.org/b", "publishedDate": "2099-01-01T02:00:00"},
             {"url": "https://user:secret@example.org/c"},
         ]}
-        requests = []
-
-        def respond(request):
-            requests.append(request)
-            return httpx.Response(200, json=payload)
-
-        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-        with patch.object(server.httpx, "AsyncClient", return_value=client), patch.object(
+        with LoopbackServer(lambda exchange: exchange.json(payload)) as fixture, patch.object(
             outbound, "download", side_effect=AssertionError("unexpected fetch")
         ):
-            result = await self.call("web_search_results", query="query", recency="1w",
-                                     domains=["example.org"])
-        self.assertEqual(len(requests), 1)
-        self.assertEqual(requests[0].url.params["time_range"], "week")
-        self.assertEqual(requests[0].url.params["q"], "query site:example.org")
+            result = await self.call("web_search_results", settings(search={"searxng_url": fixture.url}),
+                                     query="query", recency="1w", domains=["example.org"])
+        self.assertEqual(len(fixture.requests), 1)
+        params = dict(item.split("=", 1) for item in fixture.requests[0].target.split("?", 1)[1].split("&"))
+        self.assertEqual(params["time_range"], "week")
+        self.assertEqual(params["q"], "query+site%3Aexample.org")
         self.assertEqual([s["source_id"] for s in result["sources"]], ["s1", "s2"])
         self.assertEqual(result["sources"][0]["published_at"], "2098-12-31T23:30:00+00:00")
         self.assertEqual(result["sources"][1]["published_at"], "2099-01-01")
@@ -101,14 +87,14 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                 return outbound.Download("blocked", "credentials prohibited")
             return outbound.Download("fetched", final=url, kind="fetched_page", data=url.path.encode())
 
-        with patch.object(server, "_searxng", new_callable=AsyncMock) as search, patch.object(
+        with patch.object(search, "searxng", new_callable=AsyncMock) as backend, patch.object(
             outbound, "download", side_effect=download
-        ), patch.object(server.trafilatura, "extract", side_effect=lambda html, **_: f"research {html}"):
+        ), patch("trafilatura.extract", side_effect=lambda html, **_: f"research {html}"):
             result = await self.call("web_evidence_passages", query="research", urls=[
                 "https://user:secret@example.org/a", "https://example.org/a",
                 "https://EXAMPLE.org:443/a#duplicate", "https://example.org/b",
             ])
-        search.assert_not_awaited()
+        backend.assert_not_awaited()
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["mode"], "supplied_urls")
         self.assertNotIn("search", result)
@@ -124,7 +110,7 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
             {"urls": ["https://example.org"], "recency": "1w"},
             {"urls": ["https://example.org"], "domains": ["example.org"]},
         ]
-        with patch.object(server, "_searxng", new_callable=AsyncMock) as search, patch.object(
+        with patch.object(search, "searxng", new_callable=AsyncMock) as backend, patch.object(
             outbound, "download", new_callable=AsyncMock
         ) as download:
             for arguments in cases:
@@ -132,52 +118,50 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
                     result = await self.call("web_evidence_passages", query="query", **arguments)
                     self.assertEqual(result["reason"], "invalid_input")
                     self.assertEqual(result["sources"], [])
-            search.assert_not_awaited()
+            backend.assert_not_awaited()
             download.assert_not_awaited()
 
     async def test_empty_urls_discover_and_backend_failure(self):
-        with patch.object(server, "_searxng", new_callable=AsyncMock, return_value=([], "no_results")) as search:
+        with patch.object(search, "searxng", new_callable=AsyncMock, return_value=([], "no_results")) as backend:
             for arguments in ({}, {"urls": None}, {"urls": []}):
                 result = await self.call("web_evidence_passages", query="query", **arguments)
                 self.assertEqual(result["mode"], "web_search")
                 self.assertEqual(result["reason"], "no_results")
-            self.assertEqual(search.await_count, 3)
-            search.side_effect = ValueError("sensitive backend detail")
+            self.assertEqual(backend.await_count, 3)
+            backend.side_effect = ValueError("sensitive backend detail")
             result = await self.call("web_evidence_passages", query="query")
             self.assertEqual(result["reason"], "search_backend_failed")
             self.assertNotIn("sensitive", str(result))
 
     async def test_backend_timeout_and_no_evidence(self):
-        with patch.object(server, "_searxng", side_effect=asyncio.TimeoutError):
+        with patch.object(search, "searxng", side_effect=asyncio.TimeoutError):
             for tool in ("web_search_results", "web_evidence_passages"):
                 result = await self.call(tool, query="query")
                 self.assertEqual(result["reason"], "search_backend_failed")
                 self.assertEqual(result["sources"], [])
-        with patch.object(server, "_searxng", new_callable=AsyncMock) as search:
+        with patch.object(search, "searxng", new_callable=AsyncMock) as backend:
             result = await self.call("web_evidence_passages", query="query",
                                      urls=["https://127.0.0.1"])
-        search.assert_not_awaited()
+        backend.assert_not_awaited()
         self.assertEqual(result["reason"], "no_evidence")
         self.assertEqual(result["sources"][0]["fetch_status"], "blocked")
         self.assertNotIn("note", result)
 
     async def test_partial_deadline_and_cleanup(self):
         cleaned = []
-        settings = replace(DEFAULT_SETTINGS, fetch=replace(DEFAULT_SETTINGS.fetch, timeout_seconds=0.05))
+        fast = replace(CONFIGURED, fetch=replace(DEFAULT_SETTINGS.fetch, timeout_seconds=0.05))
 
-        async def fetch(source, *_args):
+        async def fetch(source, *_args, **_kwargs):
             if source.url.path == "/ok":
-                return server.Document("fetched", origin="fetched_page", units=((None, "evidence text"),))
+                return Document("fetched", origin="fetched_page", units=((None, "evidence text"),))
             try:
                 await asyncio.Future()
             finally:
                 cleaned.append(source.url.path)
 
-        with patch.object(server.settings_manager, "get", return_value=settings), patch.object(
-            server, "_fetch", side_effect=fetch
-        ):
+        with patch.object(api, "_fetch", side_effect=fetch):
             result = await asyncio.wait_for(self.call(
-                "web_evidence_passages", query="evidence", urls=[
+                "web_evidence_passages", fast, query="evidence", urls=[
                     "https://example.org/ok", "https://example.org/slow1", "https://example.org/slow2",
                 ]
             ), timeout=2)
@@ -190,13 +174,13 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         async def download(url, *_args):
             return outbound.Download("fetched", final=url, kind="fetched_page", data=url.path.encode())
 
-        def extract(html, **_):
+        def extract_text(html, **_):
             if html == "/bad":
                 raise RuntimeError("private diagnostic")
             return "usable evidence"
 
-        with patch.object(outbound, "download", side_effect=download), patch.object(
-            server.trafilatura, "extract", side_effect=extract
+        with patch.object(outbound, "download", side_effect=download), patch(
+            "trafilatura.extract", side_effect=extract_text
         ):
             result = await self.call("web_evidence_passages", query="usable", urls=[
                 "https://example.org/bad", "https://example.org/ok",
@@ -207,65 +191,68 @@ class ServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private diagnostic", str(result))
 
     def test_ranking_backfills_and_handles_tokenless_corpus(self):
-        settings = replace(DEFAULT_SETTINGS, chunk=replace(DEFAULT_SETTINGS.chunk, words=1, overlap=0))
-        sources = server._supplied([f"https://example.org/{i}" for i in range(7)], 8)
+        one_word = replace(DEFAULT_SETTINGS, chunk=replace(DEFAULT_SETTINGS.chunk, words=1, overlap=0))
+        sources = search.supplied([f"https://example.org/{i}" for i in range(7)], 8)
         docs = [
-            server.Document("fetched", origin="fetched_page", units=((None, text),))
+            Document("fetched", origin="fetched_page", units=((None, text),))
             for text in ["one two three four five six seven eight", "nine", "ten", "eleven",
                          "twelve", "thirteen", "fourteen"]
         ]
-        passages = server._rank("???", sources, docs, settings, 8)
+        passages = rank.rank("???", sources, docs, one_word, 8)
         self.assertEqual(len(passages), 8)
         self.assertEqual(sum(p["source_id"] == "s1" for p in passages), 2)
-        docs = [server.Document("fetched", origin="fetched_page", units=((None, "!!!"),))]
-        passages = server._rank("???", sources[:1], docs, settings, 8)
+        docs = [Document("fetched", origin="fetched_page", units=((None, "!!!"),))]
+        passages = rank.rank("???", sources[:1], docs, one_word, 8)
         self.assertEqual(passages[0]["score"], 0)
 
     def test_final_url_aliases_share_cap_and_passage_deduplication(self):
-        settings = replace(DEFAULT_SETTINGS, chunk=replace(DEFAULT_SETTINGS.chunk, words=1, overlap=0))
-        sources = server._supplied(["https://example.org/a", "https://example.org/b",
-                                    "https://example.net/c"], 8)
+        one_word = replace(DEFAULT_SETTINGS, chunk=replace(DEFAULT_SETTINGS.chunk, words=1, overlap=0))
+        sources = search.supplied(["https://example.org/a", "https://example.org/b",
+                                   "https://example.net/c"], 8)
         canonical = outbound.parse_url("https://example.org/final")
         docs = [
-            server.Document("fetched", final=canonical, origin="fetched_page",
-                            units=((None, "one two"),)),
-            server.Document("fetched", final=canonical, origin="fetched_page",
-                            units=((None, "three"),)),
-            server.Document("fetched", origin="fetched_page", units=((None, "one four"),)),
+            Document("fetched", final=canonical, origin="fetched_page", units=((None, "one two"),)),
+            Document("fetched", final=canonical, origin="fetched_page", units=((None, "three"),)),
+            Document("fetched", origin="fetched_page", units=((None, "one four"),)),
         ]
-        passages = server._rank("???", sources, docs, settings, 8)
+        passages = rank.rank("???", sources, docs, one_word, 8)
         self.assertEqual([p["text"] for p in passages], ["one", "two", "four"])
         self.assertEqual([p["source_id"] for p in passages], ["s1", "s1", "s3"])
 
-    def test_pdf_page_numbers_and_limits(self):
-        with pymupdf.open() as pdf:
-            pdf.new_page().insert_text((72, 72), "alpha evidence")
-            pdf.new_page()
-            pdf.new_page().insert_text((72, 72), "omega evidence")
-            data = pdf.tobytes()
-        download = outbound.Download("fetched", data=data, kind="fetched_pdf")
-        result = server._extract(download, DEFAULT_SETTINGS.fetch)
-        self.assertEqual(result.pages_examined, 3)
-        self.assertFalse(result.truncated)
-        sources = server._supplied(["https://example.org/file.pdf"], 8)
-        passages = server._rank("omega", sources, [result], DEFAULT_SETTINGS, 8)
-        self.assertEqual({p["page"] for p in passages}, {1, 3})
-        limited = server._extract(download, replace(DEFAULT_SETTINGS.fetch, max_pdf_pages=1))
-        self.assertTrue(limited.truncated)
-        self.assertEqual(limited.pages_examined, 1)
-        tiny = server._extract(download, replace(DEFAULT_SETTINGS.fetch, max_document_chars=5))
-        self.assertTrue(tiny.truncated)
-        self.assertEqual(tiny.units[0][1], "alpha")
-
     def test_html_input_and_output_caps_are_independent(self):
         download = outbound.Download("fetched", kind="fetched_page", data=b" " * 300_000)
-        with patch.object(server.trafilatura, "extract", return_value="short text"):
-            doc = server._extract(download, DEFAULT_SETTINGS.fetch)
+        with patch("trafilatura.extract", return_value="short text"):
+            doc = extract.extract(download, DEFAULT_SETTINGS.fetch)
         self.assertTrue(doc.input_capped)
         self.assertFalse(doc.truncated)
-        with patch.object(server.trafilatura, "extract", return_value="abcdefgh"):
-            doc = server._extract(outbound.Download("fetched", kind="fetched_page", data=b"<p>"),
+        with patch("trafilatura.extract", return_value="abcdefgh"):
+            doc = extract.extract(outbound.Download("fetched", kind="fetched_page", data=b"<p>"),
                                   replace(DEFAULT_SETTINGS.fetch, max_document_chars=4))
         self.assertFalse(doc.input_capped)
         self.assertTrue(doc.truncated)
         self.assertEqual(doc.units[0][1], "abcd")
+
+    async def test_page_text_paging_joins_and_unpaged_result(self):
+        text = "alpha beta gamma delta " * 50
+
+        async def download(url, *_args):
+            return outbound.Download("fetched", final=url, kind="fetched_page", data=b"<p>")
+
+        with patch.object(outbound, "download", side_effect=download), patch(
+            "trafilatura.extract", return_value=text
+        ):
+            whole = await self.call("web_page_text", url="https://example.org/")
+            self.assertEqual(whole["text"], text)
+            self.assertEqual((whole["chars"], whole["total_chars"], whole["start"], whole["next_start"]),
+                             (len(text), len(text), 0, None))
+            pieces, start = [], 0
+            while start is not None:
+                page = await self.call("web_page_text", url="https://example.org/", start=start,
+                                       max_chars=97)
+                self.assertEqual(page["start"], start)
+                self.assertEqual(page["chars"], len(page["text"]))
+                pieces.append(page["text"])
+                start = page["next_start"]
+            self.assertEqual("".join(pieces), whole["text"])
+            beyond = await self.call("web_page_text", url="https://example.org/", start=10**6)
+            self.assertEqual((beyond["text"], beyond["chars"], beyond["next_start"]), ("", 0, None))

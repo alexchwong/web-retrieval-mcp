@@ -3,7 +3,7 @@
 [Back to README](../README.md)
 
 The committed `docker-compose.yml`, `searxng/settings.yml`,
-`searxng/limiter.toml`, and `web-retrieval/settings.toml` are the **active** files.
+`searxng/limiter.toml`, and `docker/settings.toml` are the **active** files.
 Their `.example` counterparts are reference copies, **not** files automatically
 regenerated at startup. Only `.env` is created from `.env.example` by
 `setup.sh`. Never commit `.env`: it holds the SearxNG secret.
@@ -18,7 +18,9 @@ regenerated at startup. Only `.env` is created from `.env.example` by
 | `SEARXNG_BASE_URL` | `http://localhost:8888/` | Public URL advertised to SearxNG; update if the host port changes. |
 | `MCP_BIND_ADDRESS` | `127.0.0.1` | Host address exposing the MCP container. |
 | `MCP_HOST_PORT` | `8765` | Host-side MCP port; the container still listens on 8765. |
-| `MCP_SERVER_NAME` | `web-retrieval` | MCP server identity. |
+| `MCP_SERVER_NAME` | `webspell` | MCP server identity. Set `web-retrieval` to keep the 0.1.1 name. |
+| `MCP_ALLOWED_HOSTS` | empty | Extra `Host` names the request guard accepts, comma-separated. Loopback names and the Compose service name `web-retrieval` are always accepted. |
+| `MCP_ALLOWED_ORIGINS` | empty | Extra browser origins (`scheme://host:port`) the guard accepts, comma-separated. Loopback origins are always accepted. |
 | `UWSGI_WORKERS` | `2` | SearxNG worker count. |
 | `UWSGI_THREADS` | `2` | SearxNG thread count. |
 
@@ -33,14 +35,16 @@ containers. `docker compose restart` alone does **not** apply changed port
 mappings or environment configuration. Rebuilding the Python image requires
 `docker compose up -d --build`.
 
-## Research settings (`web-retrieval/settings.toml`)
+## Research settings (`docker/settings.toml`)
 
-These are the actual shipped file values; unspecified settings also have
-built-in defaults in `web-retrieval/settings.py`.
+These are the shipped Compose file values. Unspecified settings take the built-in
+defaults in `webspell/settings.py`, which are the same except where noted. A library
+host passes the same settings as a mapping (`webspell.Settings.from_mapping`) or a
+TOML file (`webspell.load_settings`); both validate identically.
 
 | Setting | Shipped value | Effect |
 |---|---:|---|
-| `search.searxng_url` | `http://searxng:8080` | SearxNG URL **from inside** the MCP container. |
+| `search.searxng_url` | `http://searxng:8080` | SearxNG URL **from inside** the MCP container. **No built-in default**: absent or empty means search is not configured, and both search paths return `search_not_configured` without making a request. The host name is resolved exactly as written, so `localhost` and the hosts file work. |
 | `search.num_results` | `8` | Maximum SearxNG result URLs considered per search. |
 | `search.timeout_seconds` | `10.0` | SearxNG request timeout (seconds). |
 | `search.language` | `en` | Search language. |
@@ -50,12 +54,18 @@ built-in defaults in `web-retrieval/settings.py`.
 | `fetch.max_bytes` | `20000000` | Maximum fetched response size per URL. |
 | `fetch.max_document_chars` | `40000` | Extracted text cap per fetched document. |
 | `fetch.max_pdf_pages` | `40` | PDF pages inspected at most. |
-| `fetch.user_agent` | `web-retrieval/1.0` | Outbound HTTP User-Agent. |
+| `fetch.user_agent` | `webSpell/0.2` | Outbound HTTP User-Agent for document requests. |
 | `chunk.words` | `350` | Approximate words per ranked passage. |
 | `chunk.overlap` | `50` | Word overlap between neighboring passages. |
 | `ranking.default_max_passages` | `8` | Passages requested if the tool caller omits `max_passages`. |
 | `ranking.max_passages` | `20` | Upper limit for the tool's `max_passages` argument. |
 | `ranking.max_passages_per_source` | `2` | Maximum returned passages per URL. |
+| `output.max_result_bytes` | unset | Unset means no result size limit (0.1.1 behaviour). When set (an integer, at least 4096), every result of every tool satisfies `webspell.result_bytes(result, ascii=output.ascii_json) <= max_result_bytes`. |
+| `output.ascii_json` | `false` | Measure size with non-ASCII characters escaped as `\uXXXX`. Set it when the client serialises results as ASCII-only JSON, where such a character costs six or twelve bytes. |
+
+The outbound policy (public-address checks, DNS pinning, redirect checks, TLS
+identity, the proxy bypass and the download cap) is not a setting and cannot be
+relaxed.
 
 An invalid edit is logged and the last successfully loaded settings are kept;
 if the first load fails, the built-in defaults are used. The container mounts
@@ -72,9 +82,11 @@ Save again or restart the MCP container if a change does not take effect.
 Some editors replace files atomically; the behavior of the bind-mounted file
 with that editing method has not been verified.
 
-For separate non-Compose execution, `MCP_SETTINGS_FILE` can select a different
-TOML path. `MCP_HOST`, `MCP_PORT` and `MCP_SERVER_NAME` are read at process
-startup and require a process restart to change.
+For a direct run (`python -m webspell`), `MCP_SETTINGS_FILE` selects the TOML file;
+with none, the built-in defaults are used and search is not configured.
+`MCP_HOST` (default `127.0.0.1`), `MCP_PORT` (default `8765`), `MCP_SERVER_NAME`,
+`MCP_ALLOWED_HOSTS` and `MCP_ALLOWED_ORIGINS` are read at process startup and
+require a process restart to change.
 
 ## MCP tools and response fields
 
@@ -91,9 +103,18 @@ startup and require a process restart to change.
   their source via `source_id`; PDF passages include a one-based `page`.
   BM25 scores describe lexical relevance. `max_passages` is clamped to the
   configured range and the result can contain fewer unique passages.
-- `web_page_text(url)` extracts one public HTML/XML-like or PDF URL and
-  returns `url`, `text` and `chars` on success. PDFs report pages examined.
-  A safe redirect can add `final_url`.
+- `web_page_text(url, start=0, max_chars=None)` extracts one public HTML/XML-like
+  or PDF URL and returns `url`, `text` and `chars` (the returned length) on success,
+  plus `total_chars`, `start` and `next_start` (`null` at the end). `start` and
+  `max_chars` select a slice of the extracted text; following `next_start` reads
+  the rest. Each call fetches the document again and there is no cache, so a page
+  that changes between calls can produce pieces that do not join. PDFs report pages
+  examined. A safe redirect can add `final_url`.
+
+`query` is at most 1,000 characters; `url` and each entry of `urls` at most 4,096.
+Arguments are checked by webSpell's own validator without coercion (a string is not
+an integer, a boolean is not an integer, an unknown argument is an error); every
+failure is the `invalid_input` result.
 
 Discovery supports recency from 1–365 days, 1–52 weeks, 1–60 months or
 1–5 years, expressed as `7d`, `1w`, `3m` or `2y`. Search metadata
@@ -105,18 +126,61 @@ results page and can miss eligible sites. Allowed subdomains must match at a
 DNS label boundary, including after redirects.
 
 Use `status` (`complete`, `partial`, `failed`), `reason` where supplied and
-each `fetch_status` to interpret results. Empty discovery can complete
+each `fetch_status` to interpret results. Outcomes added in 0.2.0, each only in
+the situation named: `search_not_configured` (no search URL), `deadline_exceeded`
+(a host's `deadline_s` expired before search answered), `pdf_unavailable` (a PDF
+source without the `pdf` extra), `output_limit` and the `output_capped`,
+`passages_omitted`, `sources_omitted` and `text_capped` fields (only with
+`output.max_result_bytes` set). Empty discovery can complete
 successfully. Evidence with no usable passages fails with `no_evidence` when
 there were source hits. `truncated` indicates an extraction limit, and
 `html_input_capped` means the HTML input was clipped before extraction.
 
-The document network budget is four times the per-operation timeout (48 s
-by default). Evidence collection, including extraction, has a separate
-deadline of up to 45 s. It is the lesser of 45 s and the search timeout plus
-three fetch timeouts for discovery, or four fetch timeouts for supplied URLs.
-Evidence completed by the deadline can be returned as partial. Cleanup and
-ranking take additional time. `web_page_text` can take its network budget
-plus extraction. See [security](security.md) for outbound restrictions.
+### Time budgets
+
+Each call computes one absolute deadline when it starts and uses it for search,
+DNS, download, waiting for a slot and extraction.
+
+| Tool | Budget without `deadline_s` | With `deadline_s` (library hosts) |
+|---|---|---|
+| `web_search_results` | `search.timeout_seconds` for the connection phase (waiting for a lookup slot, the lookup and connecting), then HTTPX per-operation timeouts | `deadline_s` for the whole call |
+| `web_evidence_passages` | the lesser of 45 s and the search timeout plus three fetch timeouts (discovery) or four fetch timeouts (supplied URLs) | the lower of that and `deadline_s` |
+| `web_page_text` | four fetch timeouts (48 s by default) for the download, the same again for waiting and extraction | the lower of that and `deadline_s`, for the whole call |
+
+Evidence completed by the deadline can be returned as partial; sources still in
+flight report `timeout`. When the connection phase of a search expires the result
+is `search_backend_failed`; when a host's `deadline_s` expires before search
+answers it is `deadline_exceeded`.
+
+### Synchronous work
+
+Two blocks run synchronously on the event loop and are not interrupted by the
+deadline or Stop: handling the SearXNG response (parse it, inspect its entries) and
+finalization after the fetches (chunk, rank, reduce to the byte limit). Their input
+is bounded: the search response is at most 2,000,000 raw bytes and only its first
+200 entries are inspected, entry URLs over 4,096 characters are skipped, and the
+argument limits above apply. **At the shipped settings each block is under 0.25
+seconds.** The finalization block grows with `search.num_results ×
+fetch.max_document_chars`, which the operator controls. A call can therefore end
+later than its deadline, and Stop can be answered later, by at most one block. A
+result that finalization produces is returned, not replaced by a timeout.
+
+### Worst-case result size without a limit
+
+With `output.max_result_bytes` unset, `web_page_text` returns up to
+`fetch.max_document_chars` characters (40,000 by default) and
+`web_evidence_passages` up to `ranking.max_passages × chunk.words` words (20 × 350
+by default), plus URLs, titles, snippets and metadata. A host with a byte limit on
+tool results should set `output.max_result_bytes`.
+
+### Process-wide limits
+
+Every call in one process shares these fixed limits (they are constants, not
+settings): 8 DNS lookups in progress, 16 downloaded documents held in memory, 6 HTML
+parsers and 1 PDF parser running. A single request is no slower than in 0.1.1; a
+third concurrent request may wait within its existing budget. Waiting for a lookup
+or document slot counts as part of the lookup or download and ends in `timeout`, as
+does waiting for a parser slot. See [operations](operations.md#known-ways-to-degrade).
 
 ## Using another SearxNG instance
 
@@ -131,16 +195,19 @@ container refers to a host-based SearxNG instance.
 ## Dependencies and supported Python versions
 
 The Dockerfile uses **Python 3.12**. CI tests **Python 3.10 and 3.13** on
-Linux and macOS, installing dependencies from
-[`web-retrieval/requirements.txt`](../web-retrieval/requirements.txt). FastMCP
-is pinned to **4.1.6**, whose Streamable HTTP API accepts the current
-`stateless_http=True` startup call; it declares support for Python 3.10+.
-Python 3.10 installs `tomli` as a conditional `tomllib` backport.
-The document transport uses HTTPX (at least 0.28.1 and below 1.0). FastMCP’s
-resolved MCP stack can use HTTPX2 independently. The project does not have a full lock,
-so fresh builds can resolve newer releases. Do not assume every release of
-these packages was tested. See [operations](operations.md#developer-tests-and-ci)
-for the exact offline checks.
+Linux and macOS. Requirements are declared in [`pyproject.toml`](../pyproject.toml):
+
+| Group | Requirements | Notes |
+|---|---|---|
+| core | `httpx>=0.28.1,<1`, `trafilatura>=2.0.0,<3`, `tomli` on Python 3.10 | No NumPy, no native PDF library, no server stack. |
+| `pdf` | `pypdfium2>=5,<6` | Imported on the first PDF only. |
+| `server` | `fastmcp>=4.1.6,<5` | The Docker image pins `fastmcp==4.1.6` exactly through `docker/constraints.txt`. |
+| `dev` | `rank-bm25==0.2.2`, `jsonschema` | Test references only; never imported at runtime. |
+
+Both HTTP clients use HTTP/1.1. FastMCP's resolved MCP stack can use HTTPX2
+independently. There is no full lock, so fresh builds can resolve newer releases
+within the ranges; do not assume every release of these packages was tested. See
+[operations](operations.md#developer-tests-and-ci) for the exact offline checks.
 
 Sources: [FastMCP 4.1.6 transport](https://github.com/PrefectHQ/fastmcp/blob/v4.1.6/fastmcp_slim/fastmcp/server/mixins/transport.py#L253-L269),
 [PyPI Python requirement](https://pypi.org/project/fastmcp/4.1.6/).

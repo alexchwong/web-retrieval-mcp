@@ -12,12 +12,20 @@ still creates security, privacy and resource-use risks.
 - Compose defaults to publishing both host ports on **`127.0.0.1` only**.
   Inside the `web-retrieval` container, `MCP_HOST=0.0.0.0` allows peers on
   the Docker network to reach it; the **host** publishing rule is separate.
+  Run directly (`python -m webspell`), the server binds `127.0.0.1`.
 - There is **no MCP authentication**, authorization, API-key requirement,
   rate limiter for the MCP tools, or per-client identity boundary.
-- FastMCP 4.1.6 offers an optional HTTP Host/Origin protection guard, but the
-  default is **off**. This repository does not enable it. The upstream MCP
-  SDK's DNS-rebinding protection is also disabled by FastMCP's HTTP setup
-  when this guard is not enabled.
+- **FastMCP's Host/Origin guard is on, in strict mode, on every launch path**
+  (direct runs and Compose). webSpell passes `host_origin_protection=True`
+  explicitly rather than relying on FastMCP's default. Requests whose `Host` is
+  `127.0.0.1`, `localhost` or `::1`, with no `Origin` or a loopback `Origin`, are
+  accepted with no configuration. `MCP_ALLOWED_HOSTS` and `MCP_ALLOWED_ORIGINS`
+  (comma-separated) add to those; Compose adds the service name `web-retrieval`
+  so containers on its network can use `http://web-retrieval:8765/mcp`. Anything
+  else is refused before tool dispatch: 421 for an unlisted `Host`, 403 for an
+  unlisted `Origin`. This stops a web page that reaches the loopback port under
+  another host name (DNS rebinding). **The guard is not authentication**: any
+  local process can still call the server.
 - Browser CORS response policy, HTTP Host/Origin validation and MCP client
   authentication are **separate** controls. None should be mistaken for
   another. A reverse proxy cannot be presumed to protect requests unless it
@@ -38,10 +46,35 @@ search domains constrain redirect destinations too.
 
 Document requests bypass environment proxies because a proxy can resolve or
 reroute the target. Proxy-only egress therefore no longer works for document
-fetches. The configured SearxNG route is separate and can be private. Discovery
+fetches. Search requests also ignore `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+`SSL_CERT_FILE` and `SSL_CERT_DIR`, so the query goes to the configured
+`search.searxng_url` and nowhere else. The configured SearxNG route can be
+private: the public-address rule applies to documents, not to SearXNG. The
+outbound policy is not a setting and cannot be relaxed through settings or the
+library API. Discovery
 summaries and extracted content are untrusted. A model can be steered by
 fetched text into requesting an internal resource even on a loopback
 deployment. Keep the service private and use network isolation where needed.
+
+## Running inside a host process (the library)
+
+In the Compose deployment the HTML and PDF parsers run in a container. A host
+application that imports the library runs them **inside the host process**.
+
+- The outbound checks prevent requests to private addresses. **They are not a
+  parser sandbox.**
+- Parser exceptions are caught and become `extract_failed`. A crash in native code
+  (lxml, PDFium) cannot be caught and would end the host process.
+- Parser inputs are bounded by the existing caps (`fetch.max_bytes`, four times
+  `fetch.max_document_chars` of HTML, `fetch.max_pdf_pages`); memory and CPU inside
+  a parse are not otherwise limited.
+- The container deployment remains the isolated option. **A host that needs a
+  process boundary should use the MCP server, not the library.**
+- Retrieved text is untrusted and can attempt prompt injection. The library returns
+  it only as document content, never as instructions or errors.
+- Every tool sends the query or the URL off the machine. Whether and when a tool may
+  be offered is the host's decision; the library has no notion of private data or
+  trusted destinations.
 
 ## Information leaving the machine
 

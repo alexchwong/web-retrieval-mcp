@@ -21,7 +21,7 @@ HTTP** selected. Alternatively use Cline's **Configure MCP Servers** editor:
 ```json
 {
   "mcpServers": {
-    "web-retrieval": {
+    "webspell": {
       "type": "streamableHttp",
       "url": "http://127.0.0.1:8765/mcp",
       "disabled": false,
@@ -43,7 +43,7 @@ In `.vscode/mcp.json` (or VS Code's user `mcp.json`), use the **`servers`** key:
 ```json
 {
   "servers": {
-    "web-retrieval": {
+    "webspell": {
       "type": "http",
       "url": "http://127.0.0.1:8765/mcp"
     }
@@ -65,7 +65,7 @@ Add a remote MCP server in Cursor's **Customize → MCP** UI, or put this in
 ```json
 {
   "mcpServers": {
-    "web-retrieval": {
+    "webspell": {
       "url": "http://127.0.0.1:8765/mcp"
     }
   }
@@ -82,7 +82,7 @@ entry using its documented Cursor-compatible notation:
 ```json
 {
   "mcpServers": {
-    "web-retrieval": {
+    "webspell": {
       "url": "http://127.0.0.1:8765/mcp"
     }
   }
@@ -99,7 +99,7 @@ Source: [LM Studio MCP guide](https://lmstudio.ai/docs/app/mcp).
 For a CLI running on the **same host** as this MCP server:
 
 ```bash
-claude mcp add --transport http web-retrieval http://127.0.0.1:8765/mcp
+claude mcp add --transport http webspell http://127.0.0.1:8765/mcp
 ```
 
 Check configured servers with `claude mcp list` and approve the server when
@@ -150,6 +150,46 @@ Source: [llama.cpp server README](https://github.com/ggml-org/llama.cpp/blob/mas
 - **Browser-origin requests:** Streamable HTTP, browser CORS response headers,
   and HTTP Host/Origin request validation are **different** concerns. A proxy
   may be required; changing only an MCP URL will not fix a browser CORS block.
+
+## Host and Origin allowlists
+
+The server validates `Host` and `Origin` on every request (see
+[security](security.md)). Every example above uses `http://127.0.0.1:8765/mcp` and
+needs no configuration, as does a browser UI served from loopback (such as the
+llama.cpp WebUI at `http://127.0.0.1:8080`) and a container on the Compose network
+using `http://web-retrieval:8765/mcp`.
+
+- **A UI opened by LAN name or another host name** (for example
+  `http://workstation.lan:8080`): add its origin to `MCP_ALLOWED_ORIGINS` in `.env`,
+  as `MCP_ALLOWED_ORIGINS=http://workstation.lan:8080`.
+- **A client that reaches the server under another host name** (a reverse proxy, an
+  `/etc/hosts` alias, a container alias): add that name to `MCP_ALLOWED_HOSTS`, as
+  `MCP_ALLOWED_HOSTS=mcp.internal`.
+- Separate several entries with commas, then run `docker compose up -d`. For a direct
+  run, set the same variables in the server's environment.
+- Without them the server answers 421 (unlisted `Host`) or 403 (unlisted `Origin`)
+  and no tool runs.
+
+## Migrating from web-retrieval-mcp 0.1.1
+
+webSpell 0.2.0 is web-retrieval-mcp under a new name, in the same repository.
+
+- **Same port, same path, same tool names:** `http://127.0.0.1:8765/mcp`,
+  `web_search_results`, `web_evidence_passages`, `web_page_text`. Result shapes are
+  unchanged; `web_page_text` accepts `start` and `max_chars` and returns three more
+  fields.
+- **The repository URL changed** to `https://github.com/alexchwong/webSpell`; the
+  old URL redirects.
+- **The server's default name is `webspell`.** A client that shows or keys on the
+  server name sees the new one; set `MCP_SERVER_NAME=web-retrieval` in `.env` to keep
+  the old one. The client-side entry name in the examples above is your choice.
+- **The Compose service is still `web-retrieval`,** so `http://web-retrieval:8765/mcp`
+  still works from other containers on the Compose network.
+- **The Host/Origin guard is on.** A client using a host name other than loopback or
+  the service name, or a browser UI served from a non-loopback origin, needs an
+  allowlist entry (above).
+- Refresh the client's cached tool list after upgrading, because `web_page_text`
+  advertises two new arguments.
 
 After connecting, ask the client to **list MCP tools** (expect `web_search_results`,
 `web_evidence_passages` and `web_page_text`) and then perform a small search that cites the source URLs.

@@ -1,0 +1,3 @@
+# Exact pins for the Docker image only. Wheel metadata carries ranges
+# (fastmcp>=4.1.6,<5); the image pins the FastMCP release it was verified with.
+fastmcp==4.1.6
