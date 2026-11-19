@@ -29,13 +29,57 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install Python requirements
+      - name: Install webSpell with all extras
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r web-retrieval/requirements.txt
+          python -m pip install -e '.[pdf,server,dev]'
 
       - name: Check Python compilation
-        run: python -m compileall -q web-retrieval
+        run: python -m compileall -q webspell tests scripts
 
       - name: Run offline tests
-        run: python -m unittest discover -s web-retrieval -p 'test_*.py' -v
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Check the pdf extra installs and extracts a fixture
+        run: |
+          python -I - <<'PY'
+          from pathlib import Path
+          from webspell import extract, outbound
+          from webspell.settings import DEFAULT_SETTINGS
+          data = Path("tests/testdata/pdf/basic.pdf").read_bytes()
+          doc = extract.extract(outbound.Download("fetched", data=data, kind="fetched_pdf"), DEFAULT_SETTINGS.fetch)
+          assert doc.status == "fetched" and doc.units[0] == (1, "alpha evidence"), doc
+          print("PASS pdf extra extracts basic.pdf")
+          PY
+
+  core-only:
+    name: Core install without extras / Python 3.13
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install webSpell without extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+      - name: Run offline tests (server, pdf and parity tests skip)
+        run: python -m unittest discover -s tests -t . -v
+
+  package:
+    name: Wheel, release checks and offline installs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist .
+      - name: Release checks
+        run: python scripts/check_release.py dist/webspell-*-py3-none-any.whl
+      - name: Offline installs from a prepared wheel directory
+        run: bash scripts/offline_install_check.sh dist/webspell-*-py3-none-any.whl

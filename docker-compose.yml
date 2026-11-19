@@ -12,17 +12,25 @@ services:
       UWSGI_WORKERS: ${UWSGI_WORKERS:-2}
       UWSGI_THREADS: ${UWSGI_THREADS:-2}
 
+  # The service keeps its 0.1.1 name so clients that address it by name keep working.
   web-retrieval:
-    build: ./web-retrieval
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
     restart: unless-stopped
     ports:
       - "${MCP_BIND_ADDRESS:-127.0.0.1}:${MCP_HOST_PORT:-8765}:8765"
     volumes:
-      - ./web-retrieval/settings.toml:/app/settings.toml:ro
+      - ./docker/settings.toml:/app/settings.toml:ro
     environment:
       MCP_HOST: 0.0.0.0
       MCP_PORT: 8765
-      MCP_SERVER_NAME: ${MCP_SERVER_NAME:-web-retrieval}
+      MCP_SERVER_NAME: ${MCP_SERVER_NAME:-webspell}
       MCP_SETTINGS_FILE: /app/settings.toml
+      # The Host/Origin guard is always on. Loopback is accepted with no
+      # configuration; the service name is added here for containers on the
+      # Compose network; .env can add more.
+      MCP_ALLOWED_HOSTS: "web-retrieval,${MCP_ALLOWED_HOSTS:-}"
+      MCP_ALLOWED_ORIGINS: "${MCP_ALLOWED_ORIGINS:-}"
     depends_on:
       - searxng

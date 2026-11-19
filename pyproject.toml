@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "webSpell"
+dynamic = ["version"]
+description = "Web search, evidence passages and page text for AI agents, as a Python library and an MCP server."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+dependencies = [
+    "httpx>=0.28.1,<1",
+    "trafilatura>=2.0.0,<3",
+    "tomli>=2.0.1; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+pdf = ["pypdfium2>=5,<6"]
+server = ["fastmcp>=4.1.6,<5"]
+# Test-only: rank-bm25 is the reference for the ranking parity test and jsonschema
+# checks the validator against the advertised schemas. Neither is used at runtime.
+dev = ["rank-bm25==0.2.2", "jsonschema>=4"]
+
+[project.urls]
+Source = "https://github.com/alexchwong/webSpell"
+Releases = "https://github.com/alexchwong/webSpell/releases"
+
+[tool.hatch.version]
+path = "webspell/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["webspell"]
+
+[tool.hatch.build.targets.sdist]
+include = ["webspell/", "tests/", "LICENSE", "THIRD_PARTY_NOTICES.md", "README.md", "NEWS.md", "pyproject.toml"]

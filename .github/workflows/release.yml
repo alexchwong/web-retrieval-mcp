@@ -1,4 +1,4 @@
-name: Release web-retrieval-mcp
+name: Release webSpell
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: web-retrieval-mcp-release
+  group: webspell-release
   cancel-in-progress: false
 
 jobs:
@@ -40,8 +40,9 @@ jobs:
           test -s release/files.txt
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "archive_root=web-retrieval-mcp-$VERSION" >> "$GITHUB_OUTPUT"
-          echo "archive=web-retrieval-mcp-$VERSION.zip" >> "$GITHUB_OUTPUT"
+          echo "archive_root=webSpell-$VERSION" >> "$GITHUB_OUTPUT"
+          echo "archive=webSpell-$VERSION.zip" >> "$GITHUB_OUTPUT"
+          echo "wheel=webspell-$VERSION-py3-none-any.whl" >> "$GITHUB_OUTPUT"
 
       - name: Check whether this version was released
         id: existing
@@ -93,8 +94,8 @@ jobs:
           git fetch --tags --force
           git rev-parse --verify "$TAG^{commit}" >/dev/null
           mapfile -t paths < release/files.txt
-          # Changes to files included in the published ZIP require a new version.
-          if ! git diff --quiet "$TAG"..HEAD -- "${paths[@]}"; then
+          # Changes to files in the published ZIP or wheel require a new version.
+          if ! git diff --quiet "$TAG"..HEAD -- "${paths[@]}" webspell pyproject.toml; then
             echo "Published $TAG has different release files. Bump release/VERSION." >&2
             exit 1
           fi
@@ -103,28 +104,47 @@ jobs:
       - name: Install dependencies and run tests
         if: steps.existing.outputs.exists != 'true'
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r web-retrieval/requirements.txt
-          python -m compileall -q web-retrieval
-          python -m unittest discover -s web-retrieval -p 'test_*.py' -v
+          python -m pip install --upgrade pip build
+          python -m pip install -e '.[pdf,server,dev]'
+          python -m compileall -q webspell tests scripts
+          python -m unittest discover -s tests -t . -v
 
-      - name: Build release ZIP from tracked files
+      - name: Build the wheel and run release checks
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          WHEEL: ${{ steps.config.outputs.wheel }}
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          python -m build --wheel --outdir dist .
+          test -f "dist/$WHEEL"
+          python scripts/check_release.py "dist/$WHEEL"
+          bash scripts/offline_install_check.sh "dist/$WHEEL"
+          (cd dist && sha256sum "$WHEEL" > "$WHEEL.sha256")
+          cat "dist/$WHEEL.sha256"
+
+      - name: Build release ZIP from tracked files and the wheel
         if: steps.existing.outputs.exists != 'true'
         shell: bash
         env:
           ARCHIVE: ${{ steps.config.outputs.archive }}
           ARCHIVE_ROOT: ${{ steps.config.outputs.archive_root }}
+          WHEEL: ${{ steps.config.outputs.wheel }}
         run: |
           set -euo pipefail
           mapfile -t files < "$RELEASE_FILES"
-          git archive --format=zip --prefix="$ARCHIVE_ROOT/" \
-            --output="$ARCHIVE" HEAD -- "${files[@]}"
+          stage="$RUNNER_TEMP/stage"
+          rm -rf "$stage" && mkdir -p "$stage/$ARCHIVE_ROOT/dist"
+          git archive --format=tar HEAD -- "${files[@]}" | tar -x -C "$stage/$ARCHIVE_ROOT"
+          cp "dist/$WHEEL" "$stage/$ARCHIVE_ROOT/dist/"
+          (cd "$stage" && zip -qrX "$GITHUB_WORKSPACE/$ARCHIVE" "$ARCHIVE_ROOT")
 
       - name: Verify release ZIP contents
         if: steps.existing.outputs.exists != 'true'
         env:
           ARCHIVE: ${{ steps.config.outputs.archive }}
           ARCHIVE_ROOT: ${{ steps.config.outputs.archive_root }}
+          WHEEL: ${{ steps.config.outputs.wheel }}
         run: |
           python - <<'PY'
           import os
@@ -136,6 +156,7 @@ jobs:
               prefix + p for p in Path(os.environ['RELEASE_FILES']).read_text().splitlines()
               if p
           }
+          expected.add(prefix + 'dist/' + os.environ['WHEEL'])
           with zipfile.ZipFile(os.environ['ARCHIVE']) as zf:
               actual = {n for n in zf.namelist() if not n.endswith('/')}
               bad = zf.testzip()
@@ -144,6 +165,13 @@ jobs:
                   f'Invalid release ZIP: bad={bad}; '
                   f'missing={sorted(expected - actual)}; extra={sorted(actual - expected)}'
               )
+          required = {prefix + p for p in ('scripts/smoke_mcp.sh', 'docker/Dockerfile',
+                                           'docker/constraints.txt', 'THIRD_PARTY_NOTICES.md',
+                                           'LICENSE', 'dist/' + os.environ['WHEEL'])}
+          if not required <= actual:
+              raise SystemExit(f'Missing release files: {sorted(required - actual)}')
+          if any('/tests/' in name or name.startswith(prefix + 'webspell/') for name in actual):
+              raise SystemExit('Refusing to release tests or loose source; the ZIP ships the wheel')
           if any(name.endswith('/.env') for name in actual):
               raise SystemExit('Refusing to release a local .env file')
           print(f'PASS: verified {len(expected)} release files')
@@ -157,9 +185,11 @@ jobs:
           VERSION: ${{ steps.config.outputs.version }}
           TAG: ${{ steps.config.outputs.tag }}
           ARCHIVE: ${{ steps.config.outputs.archive }}
+          WHEEL: ${{ steps.config.outputs.wheel }}
         run: |
           set -euo pipefail
           gh release create "$TAG" "$ARCHIVE#Installable ZIP" \
+            "dist/$WHEEL#Python wheel" "dist/$WHEEL.sha256#Wheel sha256" \
             --target "$(git rev-parse HEAD)" \
             --title "$VERSION" \
             --generate-notes
