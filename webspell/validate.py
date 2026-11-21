@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 MAX_QUERY_CHARS = 1000
 MAX_URL_CHARS = 4096
+SEARCH_CATEGORIES = ("general", "news", "science", "it")
 
 
 class InvalidInput(ValueError):
@@ -66,7 +67,13 @@ def _nullable(inner: Callable[[str, Any], None]) -> Callable[[str, Any], None]:
     return check
 
 
+def _category(name: str, value: Any) -> None:
+    if value not in SEARCH_CATEGORIES:
+        raise InvalidInput(f"{name} must be one of {', '.join(SEARCH_CATEGORIES)}")
+
+
 _QUERY = _string(MAX_QUERY_CHARS)
+_CATEGORY = _nullable(_category)
 _RECENCY = _nullable(_string())
 _DOMAINS = _nullable(_string_list(min_items=1, max_items=5,
                                   count_error="domains must contain one to five DNS names"))
@@ -79,12 +86,14 @@ FIELDS: dict[str, dict[str, tuple[Callable[[str, Any], None], bool, Any]]] = {
     "web_search_results": {
         "query": (_QUERY, True, None),
         "recency": (_RECENCY, False, None),
+        "category": (_CATEGORY, False, None),
         "domains": (_DOMAINS, False, None),
     },
     "web_evidence_passages": {
         "query": (_QUERY, True, None),
         "max_passages": (_nullable(_integer()), False, None),
         "recency": (_RECENCY, False, None),
+        "category": (_CATEGORY, False, None),
         "domains": (_DOMAINS, False, None),
         "urls": (_URLS, False, None),
     },

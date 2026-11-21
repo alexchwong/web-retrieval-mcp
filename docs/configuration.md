@@ -24,7 +24,8 @@ regenerated at startup. Only `.env` is created from `.env.example` by
 | `UWSGI_WORKERS` | `2` | SearxNG worker count. |
 | `UWSGI_THREADS` | `2` | SearxNG thread count. |
 
-Compose also accepts `SEARXNG_IMAGE` (default `docker.io/searxng/searxng:latest`)
+Compose also accepts `SEARXNG_IMAGE` (the default pins the upstream
+`2026.11.20-cd6d28091` image by digest)
 from its environment; the shipped `.env.example` does not define it.
 The container's `MCP_HOST=0.0.0.0` means **inside** the container; its host
 exposure remains controlled by `MCP_BIND_ADDRESS` in Compose.
@@ -90,14 +91,14 @@ require a process restart to change.
 
 ## MCP tools and response fields
 
-- `web_search_results(query, recency=None, domains=None)` returns search-engine
+- `web_search_results(query, recency=None, domains=None, category=None)` returns search-engine
   titles, URLs and summaries with no document requests. Its sources have
   `origin="search_snippet"` and `fetch_status="not_attempted"`.
-- `web_evidence_passages(query, max_passages=None, recency=None, domains=None, urls=None)`
+- `web_evidence_passages(query, max_passages=None, recency=None, domains=None, urls=None, category=None)`
   returns ranked `passages` and `sources`. Omit `urls`, pass null, or pass
   an empty array to discover sources. A nonempty array bypasses SearxNG and keeps
   the ranking query local. The raw array may contain up to `search.num_results`
-  URLs. Omit `recency` and `domains` in this mode. The response has
+  URLs. Omit `category`, `recency` and `domains` in this mode. The response has
   `mode="web_search"` or `mode="supplied_urls"`. Supplied sources have
   `origin="supplied_url"` with no search summary. Fetched passages link to
   their source via `source_id`; PDF passages include a one-based `page`.
@@ -116,14 +117,62 @@ Arguments are checked by webSpell's own validator without coercion (a string is 
 an integer, a boolean is not an integer, an unknown argument is an error); every
 failure is the `invalid_input` result.
 
-Discovery supports recency from 1–365 days, 1–52 weeks, 1–60 months or
-1–5 years, expressed as `7d`, `1w`, `3m` or `2y`. Search metadata
-reports the UTC cutoff and backend time window. Known publication dates
-before the cutoff are filtered. Undated results remain eligible. Native
-windows are best effort and can exclude engines without time-range support.
-Use one DNS domain for targeted search. Multiple domains filter one general
-results page and can miss eligible sites. Allowed subdomains must match at a
-DNS label boundary, including after redirects.
+### Search category and recency
+
+| `category` | What it searches |
+|---|---|
+| `general` (default) | General web pages and documentation |
+| `news` | News providers |
+| `science` | Scientific publications and repositories |
+| `it` | Software, packages, repositories and technical Q&A |
+
+WebSpell sends the chosen category to SearXNG. The instance's enabled engines
+determine coverage. SearXNG-specific query syntax such as engine bangs can
+override the category, so leave them out when selecting it through the tool.
+A date filter never selects a different category. SearXNG also offers images,
+videos, maps, music, files and social media, which webSpell does not expose as
+dedicated categories for these text tools.
+
+Set `recency` to a duration such as `"1 day"`, `"7 days"` or `"1 month"`, or
+omit it for any date. Compact equivalents (`1d`, `7d`, `1m`) and the aliases
+`day`, `week`, `month` and `year` also work. Accepted ranges are 1–365 days,
+1–52 weeks, 1–60 months and 1–5 years. The local check uses inclusive UTC
+calendar dates. Months and years use calendar arithmetic. The provider's
+native window can use a different boundary.
+
+SearXNG skips engines without support for native time filtering. If a native
+search yields no eligible sources and time remains in the search budget, webSpell
+makes one retry without the native time filter in the same category. The local
+cutoff and domain restrictions apply to both attempts. `search.time_range` is
+the planned native filter. `search.effective_time_range` is the one used for the
+selected response, and `search.attempts` records the windows actually tried.
+`search.fallback_skipped` can report an exhausted search budget.
+
+When recency is requested, a source's `date_status` is `engine_date_in_range`
+for a date supplied by the engine within the window, or `date_unknown` for
+missing or unparseable dates. Known dates outside the window are excluded.
+These fields describe search metadata, even on the evidence tool. Confirm
+publication dates in source material when freshness is required.
+
+Use one DNS domain for targeted search. Multiple domains filter one result page
+in the selected category and can miss eligible sites. Allowed subdomains must
+match at a DNS label boundary, including after redirects.
+
+### Search outcomes
+
+| Outcome | Meaning |
+|---|---|
+| `complete` with `search.degraded=true` and sources | Search returned usable hits alongside an engine or attempt failure. The evidence tool can independently return partial or failed extraction. |
+| `failed / search_inconclusive` | No eligible sources and the search had engine failures, a failed fallback, or insufficient time for the fallback. |
+| `failed / search_backend_failed` | The primary SearXNG request could not produce a usable response. |
+| `complete / no_results` | The responses contained no hits or reported engine failures. |
+| `complete / no_eligible_results` | The responses contained hits, but none passed webSpell's local filters. |
+
+`search.attempts[].engine_errors` contains up to eight engine errors per attempt.
+WebSpell normalizes common reasons such as rate limiting, CAPTCHA and parsing
+errors. It reports unrecognized reasons as `other`. Under the result size cap
+it may omit those details while preserving `search.degraded` and marking
+`search.engine_errors_omitted`.
 
 Use `status` (`complete`, `partial`, `failed`), `reason` where supplied and
 each `fetch_status` to interpret results. Outcomes added in 0.2.0, each only in
@@ -143,7 +192,7 @@ DNS, download, waiting for a slot and extraction.
 
 | Tool | Budget without `deadline_s` | With `deadline_s` (library hosts) |
 |---|---|---|
-| `web_search_results` | `search.timeout_seconds` for the connection phase (waiting for a lookup slot, the lookup and connecting), then HTTPX per-operation timeouts | `deadline_s` for the whole call |
+| `web_search_results` | `search.timeout_seconds` for the connection phase (waiting for a lookup slot, the lookup and connecting), then HTTPX per-operation timeouts. The optional retry uses only the time left in the initial search timeout. | `deadline_s` for the whole call |
 | `web_evidence_passages` | the lesser of 45 s and the search timeout plus three fetch timeouts (discovery) or four fetch timeouts (supplied URLs) | the lower of that and `deadline_s` |
 | `web_page_text` | four fetch timeouts (48 s by default) for the download, the same again for waiting and extraction | the lower of that and `deadline_s`, for the whole call |
 

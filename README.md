@@ -1,6 +1,6 @@
 # webSpell
 
-**Version 0.2.0.** Local-first web research tools for AI agents: SearXNG search,
+**Version 0.2.1.** Local-first web research tools for AI agents: SearXNG search,
 HTML/PDF text extraction and BM25-ranked evidence passages with source URLs. No
 paid search API is needed. webSpell was called **web-retrieval-mcp** up to 0.1.1;
 the repository was renamed and its history kept.
@@ -33,13 +33,13 @@ Docker must be running; the first setup needs internet access for images and Pyt
 packages. On Windows, use WSL2 with Docker access.
 
 1. Open the [GitHub Releases](https://github.com/alexchwong/webSpell/releases) page
-   and download the **attached** `webSpell-0.2.0.zip` asset (not GitHub's
+   and download the **attached** `webSpell-0.2.1.zip` asset (not GitHub's
    automatically generated source-code ZIP).
 2. From the directory containing the downloaded ZIP, run:
 
    ```bash
-   unzip webSpell-0.2.0.zip
-   cd webSpell-0.2.0
+   unzip webSpell-0.2.1.zip
+   cd webSpell-0.2.1
    ./setup.sh
    ```
 
@@ -65,8 +65,8 @@ Install the wheel attached to the release, pinned by its sha256 (published next 
 it on the release page):
 
 ```bash
-pip install "webSpell @ https://github.com/alexchwong/webSpell/releases/download/v0.2.0/webspell-0.2.0-py3-none-any.whl"
-pip install "webSpell[pdf] @ https://github.com/alexchwong/webSpell/releases/download/v0.2.0/webspell-0.2.0-py3-none-any.whl"
+pip install "webSpell @ https://github.com/alexchwong/webSpell/releases/download/v0.2.1/webspell-0.2.1-py3-none-any.whl"
+pip install "webSpell[pdf] @ https://github.com/alexchwong/webSpell/releases/download/v0.2.1/webspell-0.2.1-py3-none-any.whl"
 ```
 
 | Install | Adds | Use |
@@ -115,13 +115,20 @@ MCP_SETTINGS_FILE=./settings.toml python -m webspell
 
 | Tool | When to call it |
 |---|---|
-| `web_search_results(query, recency=None, domains=None)` | Preview search hits and snippets when choosing or refining a query. It opens no result pages. |
-| `web_evidence_passages(query, max_passages=None, recency=None, domains=None, urls=None)` | Retrieve ranked evidence passages from the supplied URLs or search the web to find sources. Defaults request eight passages, up to 20, with at most two per source URL. |
+| `web_search_results(query, recency=None, domains=None, category=None)` | Preview search hits and snippets when choosing or refining a query. It opens no result pages. |
+| `web_evidence_passages(query, max_passages=None, recency=None, domains=None, urls=None, category=None)` | Retrieve ranked evidence passages from the supplied URLs or search the web to find sources. Defaults request eight passages, up to 20, with at most two per source URL. |
 | `web_page_text(url, start=0, max_chars=None)` | Read a known public HTML/PDF URL. Defaults cap the document at 40,000 characters and inspect up to 40 PDF pages. `start` and `max_chars` select a slice; follow `next_start` to read on. |
 
-On the discovery path, both search tools accept `recency` values such as `1w`, `6m` or `2y` as upstream search preferences with local checks on known publication dates. For a targeted search use `domains=["who.int"]` to restrict the source host and its subdomains. Multiple domains filter the first general result page and may miss relevant sites. Use fetched passages for evidence and treat snippets as discovery material. Check `status`, individual `fetch_status` values, `truncated` and `html_input_capped` when interpreting sparse results.
+Both discovery tools default to `category="general"` for ordinary web search. Choose
+`news` for news coverage, `science` for papers, or `it` for software and repositories.
+Use `recency` values such as `"1 day"`, `"7 days"` or `"1 month"`. Compact values
+such as `"1m"` still work. Search can return undated hits with `date_status="date_unknown"`.
+Use `domains=["who.int"]` to restrict results to that host and its subdomains.
+Check `search.degraded` and `search.attempts` for engine failures and fallback details.
+See [configuration and tool contracts](docs/configuration.md#mcp-tools-and-response-fields)
+for date semantics and result codes.
 
-To retrieve passages from selected sources, call `web_evidence_passages` with arguments such as `{"query":"example domains","urls":["https://example.com/"],"max_passages":2}`. An empty URL list uses web search. With supplied URLs, omit `recency` and `domains`. Read the `final_url` field when a safe redirect leads to a different page.
+To retrieve passages from selected sources, call `web_evidence_passages` with arguments such as `{"query":"example domains","urls":["https://example.com/"],"max_passages":2}`. An empty URL list uses web search. With supplied URLs, omit `category`, `recency` and `domains`. Read the `final_url` field when a safe redirect leads to a different page.
 
 A `query` is at most 1,000 characters and a URL at most 4,096. Result fields and
 outcomes are described in [configuration and tool contracts](docs/configuration.md).
@@ -149,12 +156,12 @@ Run from the install directory containing `docker-compose.yml`.
 | Inspect service status and MCP logs | `docker compose ps` and `docker compose logs --tail=80 web-retrieval` |
 | Apply updated source, dependency or Compose configuration | `docker compose up -d --build` |
 
-The Compose service keeps the name `web-retrieval` in 0.2.0 so that containers
+The Compose service keeps the name `web-retrieval` so that containers
 addressing it by name keep working.
 
 For the latest published version, download the attached versioned ZIP from [GitHub Releases](https://github.com/alexchwong/webSpell/releases). Extract to a new directory, copy the old `.env` securely, and merge custom TOML and SearXNG configuration into the new defaults. Stop the old stack from its old directory before running `./setup.sh` in the new directory. Run the sanity checks before removing the old install. To roll back, stop the new stack and start the old directory with its own settings and image rebuilt if needed.
 
-For a clone tracking `devel`, inspect `git status -sb`, preserve local config edits, run `git pull --ff-only` on the intended branch, then run `docker compose up -d --build`. `devel` tracks development and can be ahead of the published release. To refresh the SearXNG image separately, run `docker compose pull searxng` followed by `docker compose up -d`. A simple restart reuses the existing container configuration. If an editor replaced the bind-mounted settings file and reload cannot see the edit, run `docker compose up -d --force-recreate web-retrieval`.
+For a clone tracking `devel`, inspect `git status -sb`, preserve local config edits, run `git pull --ff-only` on the intended branch, then run `docker compose up -d --build`. `devel` tracks development and can be ahead of the published release. Compose pins a SearXNG image. Check any `SEARXNG_IMAGE` override in `.env` when updating, then run `docker compose pull searxng` and `docker compose up -d`. A simple restart reuses the existing container configuration. If an editor replaced the bind-mounted settings file and reload cannot see the edit, run `docker compose up -d --force-recreate web-retrieval`.
 
 ## Configuration and safety
 
@@ -174,13 +181,14 @@ From the installation directory, after the stack starts:
 ```bash
 bash scripts/smoke_mcp.sh
 bash scripts/smoke_mcp.sh web_search_results
+bash scripts/smoke_mcp.sh search_general
 bash scripts/smoke_mcp.sh web_evidence_passages
 bash scripts/smoke_mcp.sh web_evidence_passages_urls
 bash scripts/smoke_mcp.sh web_page_text
 bash scripts/guard_check.sh
 ```
 
-The smoke checks call the actual Streamable HTTP endpoint from inside the MCP container, using its installed FastMCP client. Host Python, Node and an LLM are unnecessary. The optional argument selects one check plus registration. The default runs all three tools and checks both evidence modes. `web_evidence_passages_urls` is a script selector for the supplied-URL check, which can run with SearXNG offline. Override `SMOKE_QUERY` and `SMOKE_URL` for local search settings or when upstream services block the defaults. Each check reports PASS or FAIL and a failing check exits nonzero. Allow SearXNG to finish starting before retrying. Live search and public page availability can affect the outcome. `guard_check.sh` checks that loopback, in-container and service-name requests are accepted and that foreign `Host` and `Origin` headers are refused before any tool runs.
+The smoke checks call the actual Streamable HTTP endpoint from inside the MCP container, using its installed FastMCP client. Host Python, Node and an LLM are unnecessary. The optional argument selects one check plus registration. The default runs all three tools and checks both evidence modes. `web_evidence_passages_urls` is a script selector for the supplied-URL check, which can run with SearXNG offline. Override `SMOKE_QUERY` and `SMOKE_URL` for local search settings or when upstream services block the defaults. Each check reports PASS or FAIL and a failing check exits nonzero. Run `search_general` for the focused general-search checks and see [search diagnostics](docs/operations.md#verify-general-web-search) for category probes. Allow SearXNG to finish starting before retrying. Live search and public page availability can affect the outcome. `guard_check.sh` checks that loopback, in-container and service-name requests are accepted and that foreign `Host` and `Origin` headers are refused before any tool runs.
 
 ## Documentation
 

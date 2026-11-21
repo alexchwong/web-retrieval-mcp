@@ -85,7 +85,8 @@ class LimitTests(unittest.TestCase):
     def test_every_tool_within_limit(self):
         urls = [f"https://example{i}.org/" + "path/" * (i * 40) for i in range(8)]
         download, extract = documents(cjk_emoji)
-        with patch.object(search, "searxng", AsyncMock(return_value=(search_sources(urls), "x"))), download, extract:
+        outcome = search.SearchOutcome(search_sources(urls), None, {})
+        with patch.object(search, "searxng", AsyncMock(return_value=outcome)), download, extract:
             for size_limit in (4096, 32768):
                 for ascii_json in (False, True):
                     cases = {
@@ -108,7 +109,8 @@ class LimitTests(unittest.TestCase):
     def test_eight_sources_at_minimum_limit_keep_a_passage(self):
         urls = [f"https://example{i}.org/article" for i in range(8)]
         download, extract = documents(cjk_emoji)
-        with patch.object(search, "searxng", AsyncMock(return_value=(search_sources(urls), "x"))), download, extract:
+        outcome = search.SearchOutcome(search_sources(urls), None, {})
+        with patch.object(search, "searxng", AsyncMock(return_value=outcome)), download, extract:
             for ascii_json in (False, True):
                 result = self.run_tool("web_evidence_passages", {"query": "evidence"}, limited(4096, ascii_json))
                 self.assertGreaterEqual(len(result["passages"]), 1)
@@ -152,7 +154,7 @@ class LimitTests(unittest.TestCase):
         urls = ["https://example.org/" + "é" * 2300] + [f"https://example{i}.org/" for i in range(7)]
         plain = [Source(outbound.parse_url(url), {"title": "A title", "snippet": "A snippet " * 30,
                                                   "origin": "search_snippet"}) for url in urls]
-        with patch.object(search, "searxng", AsyncMock(return_value=(plain, "x"))):
+        with patch.object(search, "searxng", AsyncMock(return_value=search.SearchOutcome(plain, None, {}))):
             unlimited = self.run_tool("web_search_results", {"query": "q"}, limited())
             result = self.run_tool("web_search_results", {"query": "q"}, limited(4096))
         self.check_invariants(result, unlimited, 4096, False)
@@ -161,7 +163,8 @@ class LimitTests(unittest.TestCase):
 
     def test_every_url_too_long_is_output_limit(self):
         urls = [f"https://example{i}.org/" + "é" * 2300 for i in range(3)]
-        with patch.object(search, "searxng", AsyncMock(return_value=(search_sources(urls), "x"))):
+        outcome = search.SearchOutcome(search_sources(urls), None, {})
+        with patch.object(search, "searxng", AsyncMock(return_value=outcome)):
             self.assertEqual(self.run_tool("web_search_results", {"query": "q"}, limited(4096)),
                              limit.output_limit())
         download, extract = documents(lambda key: "evidence " * 50)
@@ -229,7 +232,7 @@ class LimitTests(unittest.TestCase):
     def test_no_passages_keeps_sources_in_order(self):
         urls = [f"https://example{i}.org/" + "p" * 900 for i in range(8)]
         failed = outbound.Download("http_error", "document server returned an HTTP error")
-        with patch.object(search, "searxng", AsyncMock(return_value=(search_sources(urls), "x"))), \
+        with patch.object(search, "searxng", AsyncMock(return_value=search.SearchOutcome(search_sources(urls), None, {}))), \
                 patch.object(outbound, "download", AsyncMock(return_value=failed)):
             unlimited = self.run_tool("web_evidence_passages", {"query": "q"}, limited())
             result = self.run_tool("web_evidence_passages", {"query": "q"}, limited(4096))

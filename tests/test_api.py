@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import date
 import unittest
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs, urlsplit
 
 from webspell import api, extract, outbound, rank, search
 from webspell.extract import Document
@@ -31,6 +32,11 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     def test_recency_and_domain_validation(self):
         cases = [
             ("1w", "week", "native", "2024-03-24"),
+            ("day", "day", "native", "2024-03-30"),
+            ("1 day", "day", "native", "2024-03-30"),
+            ("7 days", "week", "native", "2024-03-24"),
+            ("month", "month", "native", "2024-02-29"),
+            ("1 month", "month", "native", "2024-02-29"),
             ("7d", "week", "native", "2024-03-24"),
             ("1m", "month", "native", "2024-02-29"),
             ("28d", "month", "native_widened", "2024-03-03"),
@@ -68,18 +74,112 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         ]}
         with LoopbackServer(lambda exchange: exchange.json(payload)) as fixture, patch.object(
             outbound, "download", side_effect=AssertionError("unexpected fetch")
-        ):
+        ), patch.object(api, "_today", return_value=date(2099, 1, 1)):
             result = await self.call("web_search_results", settings(search={"searxng_url": fixture.url}),
                                      query="query", recency="1w", domains=["example.org"])
         self.assertEqual(len(fixture.requests), 1)
         params = dict(item.split("=", 1) for item in fixture.requests[0].target.split("?", 1)[1].split("&"))
         self.assertEqual(params["time_range"], "week")
+        self.assertEqual(params["categories"], "general")
         self.assertEqual(params["q"], "query+site%3Aexample.org")
         self.assertEqual([s["source_id"] for s in result["sources"]], ["s1", "s2"])
         self.assertEqual(result["sources"][0]["published_at"], "2098-12-31T23:30:00+00:00")
         self.assertEqual(result["sources"][1]["published_at"], "2099-01-01")
         self.assertEqual(len(result["sources"][0]["snippet"]), 600)
         self.assertTrue(all(s["fetch_status"] == "not_attempted" for s in result["sources"]))
+
+    async def test_filtered_search_falls_back_with_same_category_and_cutoff(self):
+        def respond(exchange):
+            params = parse_qs(urlsplit(exchange.target).query)
+            if "time_range" in params:
+                exchange.json({"results": [], "unresponsive_engines": [["bing news", "Parsing error"]]})
+            else:
+                exchange.json({"results": [
+                    {"url": "https://example.org/older", "publishedDate": "2024-02-28"},
+                    {"url": "https://example.org/boundary", "publishedDate": "2024-02-29"},
+                    {"url": "https://example.org/future", "publishedDate": "2024-04-01"},
+                    {"url": "https://example.org/undated"},
+                    {"url": "https://example.net/unrelated"},
+                ]})
+
+        with LoopbackServer(respond) as fixture, patch.object(api, "_today", return_value=date(2024, 3, 31)):
+            result = await api.search_results(
+                "query", category="news", recency="month", domains=["example.org"],
+                settings=settings(search={"searxng_url": fixture.url, "safesearch": 2, "language": "en-AU"}),
+            )
+        first, second = [parse_qs(urlsplit(request.target).query) for request in fixture.requests]
+        self.assertEqual(first.pop("time_range"), ["month"])
+        self.assertEqual(first, second)
+        self.assertEqual(second["categories"], ["news"])
+        self.assertEqual(second["safesearch"], ["2"])
+        self.assertEqual(second["language"], ["en-AU"])
+        self.assertEqual(second["q"], ["query site:example.org"])
+        self.assertEqual(result["status"], "complete")
+        meta = result["search"]
+        self.assertEqual((meta["recency"], meta["cutoff_utc"], meta["category"]),
+                         ("1m", "2024-02-29", "news"))
+        self.assertIsNone(meta["effective_time_range"])
+        self.assertTrue(meta["degraded"])
+        self.assertEqual(meta["attempts"], [
+            {"time_range": "month", "engine_errors": [{"engine": "bing news", "reason": "parse_error"}]},
+            {"time_range": None, "engine_errors": []},
+        ])
+        self.assertEqual([(source["url"].rsplit("/", 1)[-1], source["date_status"])
+                          for source in result["sources"]],
+                         [("boundary", "engine_date_in_range"), ("undated", "date_unknown")])
+
+    async def test_search_outcomes_for_empty_and_failed_engines(self):
+        errors = [["brave", "Suspended: Too many requests"], ["duckduckgo", "CAPTCHA"],
+                  ["other", "private upstream text"]]
+        outcomes = [
+            ({"results": []}, "complete", "no_results", False),
+            ({"results": [], "unresponsive_engines": errors}, "failed", "search_inconclusive", True),
+            ({"results": [{"url": "bad"}]}, "complete", "no_eligible_results", False),
+        ]
+        for payload, status, reason, degraded in outcomes:
+            with self.subTest(reason=reason), LoopbackServer(lambda exchange: exchange.json(payload)) as fixture:
+                configured = settings(search={"searxng_url": fixture.url})
+                preview = await api.search_results("query", category="it", settings=configured)
+                evidence = await api.evidence_passages("query", category="science", settings=configured)
+                for result in (preview, evidence):
+                    self.assertEqual((result["status"], result["reason"]), (status, reason))
+                    self.assertEqual(result["search"]["degraded"], degraded)
+                    self.assertNotIn("private upstream text", str(result))
+                    self.assertEqual(len(result["search"]["attempts"]), 1)
+                params = [parse_qs(urlsplit(request.target).query) for request in fixture.requests]
+                self.assertEqual([request["categories"] for request in params], [["it"], ["science"]])
+                if degraded:
+                    reported = preview["search"]["attempts"][0]["engine_errors"]
+                    self.assertEqual(reported[0], {"engine": "brave", "reason": "rate_limited",
+                                                   "state": "suspended"})
+                    self.assertEqual(reported[1]["reason"], "captcha")
+
+    async def test_fallback_backend_failure_preserves_primary_diagnostics(self):
+        def respond(exchange):
+            if "time_range" in parse_qs(urlsplit(exchange.target).query):
+                exchange.json({"results": [], "unresponsive_engines": [["brave", "Timeout"]]})
+            else:
+                exchange.respond(503, b"")
+
+        with LoopbackServer(respond) as fixture:
+            result = await api.search_results("query", recency="1 day",
+                                              settings=settings(search={"searxng_url": fixture.url}))
+        self.assertEqual(len(fixture.requests), 2)
+        self.assertEqual((result["status"], result["reason"]), ("failed", "search_inconclusive"))
+        self.assertEqual(result["search"]["attempts"][-1],
+                         {"time_range": None, "error": "search_backend_failed"})
+
+    async def test_diagnostics_yield_to_hits_under_output_cap(self):
+        payload = {"results": [{"url": "https://example.org/"}],
+                   "unresponsive_engines": [[letter * 64, "Timeout"] for letter in "abcdefgh"]}
+        with LoopbackServer(lambda exchange: exchange.json(payload)) as fixture:
+            configured = settings(search={"searxng_url": fixture.url}, output={"max_result_bytes": 900})
+            result = await api.search_results("query", settings=configured)
+        self.assertEqual(result["status"], "complete")
+        self.assertTrue(result["search"]["degraded"])
+        self.assertTrue(result["search"]["engine_errors_omitted"])
+        self.assertEqual(result["sources"][0]["url"], "https://example.org/")
+        self.assertLessEqual(api.result_bytes(result), 900)
 
     async def test_supplied_urls_order_deduplication_and_no_backend(self):
         async def download(url, *_args):
@@ -109,6 +209,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             {"urls": ["https://example.org", "http://bad name"]},
             {"urls": ["https://example.org"], "recency": "1w"},
             {"urls": ["https://example.org"], "domains": ["example.org"]},
+            {"urls": ["https://example.org"], "category": "science"},
+            {"category": "images"},
         ]
         with patch.object(search, "searxng", new_callable=AsyncMock) as backend, patch.object(
             outbound, "download", new_callable=AsyncMock
@@ -122,7 +224,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             download.assert_not_awaited()
 
     async def test_empty_urls_discover_and_backend_failure(self):
-        with patch.object(search, "searxng", new_callable=AsyncMock, return_value=([], "no_results")) as backend:
+        with patch.object(search, "searxng", new_callable=AsyncMock,
+                          return_value=search.SearchOutcome([], "no_results", {})) as backend:
             for arguments in ({}, {"urls": None}, {"urls": []}):
                 result = await self.call("web_evidence_passages", query="query", **arguments)
                 self.assertEqual(result["mode"], "web_search")

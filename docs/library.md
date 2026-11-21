@@ -11,7 +11,7 @@ webSpell is distributed from GitHub releases only. Pin the wheel by URL and sha2
 (the `.sha256` file is attached next to the wheel on the release page):
 
 ```text
-webSpell[pdf] @ https://github.com/alexchwong/webSpell/releases/download/v0.2.0/webspell-0.2.0-py3-none-any.whl#sha256=<sha256>
+webSpell[pdf] @ https://github.com/alexchwong/webSpell/releases/download/v0.2.1/webspell-0.2.1-py3-none-any.whl#sha256=<sha256>
 ```
 
 Core (`httpx`, `trafilatura`) is about 64 MB installed; the `pdf` extra adds
@@ -27,13 +27,13 @@ HTML page would report `extract_failed`.
 ```python
 import webspell
 
-webspell.__version__            # "0.2.0"
+webspell.__version__            # "0.2.1"
 webspell.INTERFACE_VERSION      # 1
 webspell.TOOLS                  # ({"name", "description", "input_schema"}, ...) for all three tools
 
-await webspell.search_results(query, *, recency=None, domains=None, settings, deadline_s=None)
+await webspell.search_results(query, *, recency=None, domains=None, category=None, settings, deadline_s=None)
 await webspell.evidence_passages(query, *, urls=None, max_passages=None, recency=None,
-                                 domains=None, settings, deadline_s=None)
+                                 domains=None, category=None, settings, deadline_s=None)
 await webspell.page_text(url, *, start=0, max_chars=None, settings, deadline_s=None)
 
 webspell.call(name, arguments, *, settings, cancel=None, deadline_s=None)   # -> dict
@@ -59,8 +59,10 @@ webspell.load_settings(path)            # validate a TOML file (the only file we
   environment variables. The library logs to the `webspell` logger and never
   configures it. The exception is the process-wide limits below.
 - **Stability.** Names, argument names and result fields of interface version 1
-  change only with an `INTERFACE_VERSION` increase. Adding a result field is not a
-  change.
+  change only with an `INTERFACE_VERSION` increase. Version 0.2.1 adds the optional
+  `category` argument and search diagnostics. Existing Python calls still work.
+  Hosts that pin exact MCP input schemas must update their schema pin together
+  with the webSpell version.
 
 ## What a host needs to know
 
