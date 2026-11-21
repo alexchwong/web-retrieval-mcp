@@ -1,5 +1,20 @@
 # Changes
 
+## 0.2.1
+
+- General web search remains the default. Both discovery tools also accept
+  `news`, `science` and `it` as explicit categories.
+- `recency` accepts plain-English durations alongside compact values. An empty
+  native time-filtered search can retry once in the same category. Undated hits
+  are marked as such and known dates outside the requested window are filtered.
+- Search responses distinguish a clean empty result from an inconclusive query
+  with upstream engine failures. Usable hits remain available when coverage
+  degrades. Both search paths expose attempt and engine diagnostics.
+- Compose pins a November SearXNG build that includes the October Brave engine
+  fix. Existing `SEARXNG_IMAGE` overrides still take precedence.
+- Exact-schema MCP clients need the updated schemas for the two discovery tools.
+  Added a general web search smoke cohort and optional category and recency probes.
+
 ## 0.2.0
 
 web-retrieval-mcp is now **webSpell**: the same retrieval engine, delivered as a Python

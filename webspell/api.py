@@ -19,13 +19,13 @@ __all__ = ["TOOLS", "search_results", "evidence_passages", "page_text", "call", 
 
 _SEARCH_DESCRIPTION = (
     "Preview titles, URLs and search-engine summaries without opening pages.\n"
-    "Recency is best effort. One domain targets search; several filter one general results page."
+    "Recency is best effort. One domain targets search; several filter one results page."
 )
 _EVIDENCE_DESCRIPTION = (
     "Fetch evidence passages ranked for lexical relevance to the query.\n"
-    "A nonempty URL list bypasses search and disallows recency and domains.\n"
+    "A nonempty URL list bypasses search and disallows category, recency and domains.\n"
     "In web search mode, recency is best effort. One domain targets search;\n"
-    "several domains filter one general results page."
+    "several domains filter one results page."
 )
 _PAGE_DESCRIPTION = (
     "Extract the main text of one known public HTML or PDF URL, subject to document limits."
@@ -37,7 +37,14 @@ def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 _QUERY = {"type": "string", "maxLength": validate.MAX_QUERY_CHARS}
-_RECENCY = _nullable({"type": "string"})
+_RECENCY = {
+    **_nullable({"type": "string"}),
+    "description": 'Best-effort publication window. Use "1 day", "7 days" or "1 month". Omit for any date.',
+}
+_CATEGORY = {
+    **_nullable({"type": "string", "enum": list(validate.SEARCH_CATEGORIES)}),
+    "description": "General web (default), news, science (papers) or it (software and repositories).",
+}
 _DOMAINS = _nullable({"items": {"type": "string"}, "type": "array", "minItems": 1, "maxItems": 5})
 
 TOOLS: tuple[dict[str, Any], ...] = (
@@ -46,7 +53,7 @@ TOOLS: tuple[dict[str, Any], ...] = (
         "description": _SEARCH_DESCRIPTION,
         "input_schema": {
             "additionalProperties": False,
-            "properties": {"query": _QUERY, "recency": _RECENCY, "domains": _DOMAINS},
+            "properties": {"query": _QUERY, "category": _CATEGORY, "recency": _RECENCY, "domains": _DOMAINS},
             "required": ["query"],
             "type": "object",
         },
@@ -59,6 +66,7 @@ TOOLS: tuple[dict[str, Any], ...] = (
             "properties": {
                 "query": _QUERY,
                 "max_passages": _nullable({"type": "integer"}),
+                "category": _CATEGORY,
                 "recency": _RECENCY,
                 "domains": _DOMAINS,
                 "urls": _nullable({"items": {"type": "string", "maxLength": validate.MAX_URL_CHARS},
@@ -194,7 +202,7 @@ async def _search_results(arguments: Any, settings: Settings,
     try:
         args = validate.check("web_search_results", arguments)
         _query(args["query"])
-        query = search.search_input(args["query"], args["recency"], args["domains"], _today())
+        query = search.search_input(args["query"], args["recency"], args["domains"], _today(), args["category"])
     except ValueError as exc:
         return _invalid(str(exc), sources=[])
     result: dict[str, Any] = {"search": query.metadata, "sources": []}
@@ -203,20 +211,21 @@ async def _search_results(arguments: Any, settings: Settings,
     loop = asyncio.get_running_loop()
     try:
         if host_deadline is None:
-            sources, reason = await search.searxng(query, settings.search)
+            outcome = await search.searxng(query, settings.search)
         else:
             task = asyncio.create_task(search.searxng(query, settings.search))
             if not await outbound.wait_owned([task], host_deadline - loop.time()):
                 return {**result, **_deadline_exceeded()}
-            sources, reason = task.result()
+            outcome = task.result()
     except _SEARCH_ERRORS:
         return {**result, **_backend_failed()}
-    result.update(status="complete", sources=[
+    result["search"] = {**query.metadata, **outcome.metadata}
+    result.update(status=outcome.status, sources=[
         {**_source_fields(source, index), "fetch_status": "not_attempted"}
-        for index, source in enumerate(sources, 1)
+        for index, source in enumerate(outcome.sources, 1)
     ])
-    if not sources:
-        result["reason"] = reason
+    if outcome.reason:
+        result["reason"] = outcome.reason
     return result
 
 
@@ -227,12 +236,12 @@ async def _evidence_passages(arguments: Any, settings: Settings,
         args = validate.check("web_evidence_passages", arguments)
         _query(args["query"])
         if args["urls"]:
-            if args["recency"] is not None or args["domains"] is not None:
-                raise ValueError("omit recency and domains when supplying URLs")
+            if any(args[name] is not None for name in ("category", "recency", "domains")):
+                raise ValueError("omit category, recency and domains when supplying URLs")
             sources = search.supplied(args["urls"], settings.search.num_results)
             query = None
         else:
-            query = search.search_input(args["query"], args["recency"], args["domains"], _today())
+            query = search.search_input(args["query"], args["recency"], args["domains"], _today(), args["category"])
     except ValueError as exc:
         return _invalid(str(exc), **result)
 
@@ -254,11 +263,13 @@ async def _evidence_passages(arguments: Any, settings: Settings,
         try:
             if not await outbound.wait_owned([task], deadline - loop.time()):
                 return {**result, **(_deadline_exceeded() if host_limited else _backend_failed())}
-            sources, reason = task.result()
+            outcome = task.result()
         except _SEARCH_ERRORS:
             return {**result, **_backend_failed()}
+        result["search"] = {**query.metadata, **outcome.metadata}
+        sources = outcome.sources
         if not sources:
-            return {**result, "status": "complete", "reason": reason}
+            return {**result, "status": outcome.status, "reason": outcome.reason}
 
     remaining = deadline - loop.time()
     if remaining > 0:
@@ -366,21 +377,23 @@ async def run_tool(name: str, arguments: Any, settings: Settings,
 # ---------- public API ------------------------------------------------------ #
 
 async def search_results(query: str, *, recency: str | None = None, domains: list[str] | None = None,
-                         settings: Settings, deadline_s: float | None = None) -> dict[str, Any]:
+                         category: str | None = None, settings: Settings, deadline_s: float | None = None) -> dict[str, Any]:
     """Search titles, URLs and summaries without opening pages."""
     _check_call(settings, deadline_s)
-    return await _run("web_search_results", {"query": query, "recency": recency, "domains": domains},
-                      settings, deadline_s)
+    return await _run("web_search_results", {
+        "query": query, "recency": recency, "domains": domains, "category": category,
+    }, settings, deadline_s)
 
 
 async def evidence_passages(query: str, *, urls: list[str] | None = None,
                             max_passages: int | None = None, recency: str | None = None,
-                            domains: list[str] | None = None, settings: Settings,
+                            domains: list[str] | None = None, category: str | None = None, settings: Settings,
                             deadline_s: float | None = None) -> dict[str, Any]:
     """Fetch passages ranked for lexical relevance, from search or supplied URLs."""
     _check_call(settings, deadline_s)
     return await _run("web_evidence_passages", {
         "query": query, "max_passages": max_passages, "recency": recency, "domains": domains,
+        "category": category,
         "urls": urls,
     }, settings, deadline_s)
 

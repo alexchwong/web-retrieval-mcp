@@ -11,7 +11,7 @@ from webspell import validate
 HAVE_JSONSCHEMA = importlib.util.find_spec("jsonschema") is not None
 
 SAMPLES = {
-    "string": ["", "x", "q" * 1000, "q" * 1001, "u" * 4096, "u" * 4097, "ü" * 1000],
+    "string": ["", "x", "general", "news", "science", "it", "images", "q" * 1000, "q" * 1001, "u" * 4096, "u" * 4097, "ü" * 1000],
     "other": [None, 0, 1, -1, 7, True, False, 1.0, 2.5, [], ["a"], ["a"] * 5, ["a"] * 6,
               ["a", 1], ["u" * 4097], {}, {"a": 1}],
 }

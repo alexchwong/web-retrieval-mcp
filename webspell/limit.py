@@ -53,6 +53,15 @@ def apply(tool: str, result: dict[str, Any], output: OutputSettings) -> dict[str
         return result
     reducer = {"web_search_results": _search_results, "web_evidence_passages": _evidence,
                "web_page_text": _page_text}[tool]
+    # Preserve the search outcome and usable sources when diagnostics consume the budget.
+    search = result.get("search", {})
+    if any(attempt.get("engine_errors") for attempt in search.get("attempts", [])):
+        attempts = [{k: v for k, v in attempt.items() if k != "engine_errors"}
+                    for attempt in search["attempts"]]
+        result = {**result, "output_capped": True,
+                  "search": {**search, "attempts": attempts, "engine_errors_omitted": True}}
+        if measure.fits(result):
+            return result
     reduced = reducer(result, measure)
     if reduced is None or not measure.fits(reduced):
         return output_limit()

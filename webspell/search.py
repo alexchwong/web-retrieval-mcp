@@ -25,6 +25,7 @@ _NATIVE = {"1d": "day", "1w": "week", "7d": "week", "1m": "month", "1y": "year",
 MAX_RESPONSE_BYTES = 2_000_000
 MAX_ENTRIES = 200
 MAX_URL_CHARS = 4096
+MAX_ENGINE_ERRORS = 8
 
 
 class SearchFailed(Exception):
@@ -36,6 +37,7 @@ class Search:
     query: str
     domains: tuple[str, ...]
     cutoff: date | None
+    as_of: date
     metadata: dict[str, Any]
 
 
@@ -45,13 +47,31 @@ class Source:
     fields: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class SearchAttempt:
+    sources: list[Source]
+    had_hits: bool
+    engine_errors: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
+class SearchOutcome:
+    sources: list[Source]
+    reason: str | None
+    metadata: dict[str, Any]
+
+    @property
+    def status(self) -> str:
+        return "failed" if self.reason == "search_inconclusive" else "complete"
+
+
 def _months_before(today: date, months: int) -> date:
     year, month = divmod(today.year * 12 + today.month - 1 - months, 12)
     return date(year, month + 1, min(today.day, monthrange(year, month + 1)[1]))
 
 
 def search_input(query: str, recency: str | None, domains: list[str] | None,
-                 today: date) -> Search:
+                 today: date, category: str | None = None) -> Search:
     normalized: tuple[str, ...] = ()
     if domains is not None:
         if not 1 <= len(domains) <= 5:
@@ -60,10 +80,16 @@ def search_input(query: str, recency: str | None, domains: list[str] | None,
     cutoff = None
     method, time_range = "none", None
     if recency is not None:
-        match = re.fullmatch(r"([1-9][0-9]{0,2})([dwmy])", recency)
-        if match is None:
-            raise ValueError("recency must use a positive number and d, w, m or y")
-        amount, unit = int(match[1]), match[2]
+        # Preserve compact inputs and normalize spelled-out model arguments to the same units.
+        compact = re.fullmatch(r"([1-9][0-9]{0,2})([dwmy])", recency)
+        words = re.fullmatch(r"(?:([1-9][0-9]{0,2}) )?(day|week|month|year)s?", recency)
+        if compact:
+            amount, unit = int(compact[1]), compact[2]
+        elif words:
+            amount, unit = int(words[1] or 1), words[2][0]
+            recency = f"{amount}{unit}"
+        else:
+            raise ValueError('recency must be a duration such as "1 day", "7 days" or "1 month"')
         if amount > {"d": 365, "w": 52, "m": 60, "y": 5}[unit]:
             raise ValueError("recency exceeds the allowed range")
         if unit in ("d", "w"):
@@ -80,8 +106,8 @@ def search_input(query: str, recency: str | None, domains: list[str] | None,
             method = "native_widened" if time_range else "local_dates_only"
     if len(normalized) == 1:
         query += f" site:{normalized[0]}"
-    return Search(query, normalized, cutoff, {
-        "recency": recency, "recency_method": method, "time_range": time_range,
+    return Search(query, normalized, cutoff, today, {
+        "category": category or "general", "recency": recency, "recency_method": method, "time_range": time_range,
         "as_of_utc": today.isoformat(), "cutoff_utc": cutoff.isoformat() if cutoff else None,
         "domains": list(normalized),
     })
@@ -192,7 +218,26 @@ async def _body(settings: SearchSettings, params: dict[str, str]) -> bytes:
     raise SearchFailed("search backend unreachable") from failure
 
 
-def _sources(data: bytes, search: Search, num_results: int) -> tuple[list[Source], str]:
+def _engine_errors(values: Any) -> list[dict[str, str]]:
+    """Translate known diagnostics without passing remote error text to callers."""
+    if not isinstance(values, list):
+        return []
+    reasons = {"too many requests": "rate_limited", "captcha": "captcha",
+               "access denied": "access_denied", "timeout": "timeout",
+               "http error": "http_error", "parsing error": "parse_error"}
+    errors = []
+    for entry in values[:MAX_ENGINE_ERRORS]:
+        engine, message = entry if isinstance(entry, list) and len(entry) == 2 else (None, None)
+        if not isinstance(engine, str) or not re.fullmatch(r"[\w .&()+/-]{1,64}", engine, re.ASCII):
+            engine = "unknown"
+        message = message[:128].lower().strip() if isinstance(message, str) else ""
+        suspended = message.startswith("suspended:")
+        reason = reasons.get(message.removeprefix("suspended:").strip(), "other")
+        errors.append({"engine": engine, "reason": reason, **({"state": "suspended"} if suspended else {})})
+    return errors
+
+
+def _sources(data: bytes, search: Search, num_results: int) -> SearchAttempt:
     """Parse the response and select sources. Synchronous; its input is bounded."""
     try:
         payload = json.loads(data)
@@ -215,25 +260,24 @@ def _sources(data: bytes, search: Search, num_results: int) -> tuple[list[Source
                 or not outbound.matches(url.host, search.domains)):
             continue
         published_date, published_at = _publication(item.get("publishedDate"))
-        if search.cutoff and published_date and published_date < search.cutoff:
+        if search.cutoff and published_date and not search.cutoff <= published_date <= search.as_of:
             continue
         fields = {"title": summary(item.get("title"), 300),
                   "snippet": summary(item.get("content"), 600), "origin": "search_snippet"}
         if published_at:
             fields["published_at"] = published_at
+        if search.cutoff:
+            fields["date_status"] = "engine_date_in_range" if published_at else "date_unknown"
         sources.append(Source(url, fields))
         seen.add(url.key)
         if len(sources) >= num_results:
             break
-    return sources, "no_eligible_results" if payload["results"] else "no_results"
+    return SearchAttempt(sources, bool(payload["results"]),
+                         _engine_errors(payload.get("unresponsive_engines")))
 
 
-async def searxng(search: Search, settings: SearchSettings) -> tuple[list[Source], str]:
-    """Query SearXNG. Every expected failure is raised as ``SearchFailed``."""
-    params = {"q": search.query, "format": "json", "safesearch": str(settings.safesearch),
-              "language": settings.language}
-    if search.metadata["time_range"]:
-        params["time_range"] = search.metadata["time_range"]
+async def _attempt(search: Search, settings: SearchSettings,
+                   params: dict[str, str]) -> SearchAttempt:
     try:
         data = await _body(settings, params)
     except SearchFailed:
@@ -241,3 +285,42 @@ async def searxng(search: Search, settings: SearchSettings) -> tuple[list[Source
     except (httpx.HTTPError, httpx.InvalidURL, OSError, ValueError, asyncio.TimeoutError) as exc:
         raise SearchFailed("search backend failed") from exc
     return _sources(data, search, settings.num_results)
+
+
+async def searxng(search: Search, settings: SearchSettings) -> SearchOutcome:
+    """Search the requested category, with at most one retry without the time filter."""
+    loop = asyncio.get_running_loop()
+    retry_deadline = loop.time() + settings.timeout_seconds
+    params = {"q": search.query, "format": "json", "safesearch": str(settings.safesearch),
+              "language": settings.language, "categories": search.metadata["category"]}
+    window = search.metadata["time_range"]
+    primary = await _attempt(search, settings, {**params, "time_range": window} if window else params)
+    attempts = [{"time_range": window, "engine_errors": primary.engine_errors}]
+    chosen = primary
+    effective_window = window
+    remaining = retry_deadline - loop.time()
+    fallback_needed = bool(window and not primary.sources)
+    fallback_skipped = fallback_needed and remaining <= 0
+    if fallback_needed and not fallback_skipped:
+        try:
+            chosen = await asyncio.wait_for(_attempt(search, settings, params), remaining)
+        except (SearchFailed, asyncio.TimeoutError):
+            attempts.append({"time_range": None, "error": "search_backend_failed"})
+        else:
+            effective_window = None
+            attempts.append({"time_range": None, "engine_errors": chosen.engine_errors})
+
+    degraded = fallback_skipped or any(attempt.get("engine_errors") or attempt.get("error")
+                                       for attempt in attempts)
+    reason = None
+    if not chosen.sources:
+        if degraded:
+            reason = "search_inconclusive"
+        elif primary.had_hits or chosen.had_hits:
+            reason = "no_eligible_results"
+        else:
+            reason = "no_results"
+    return SearchOutcome(chosen.sources, reason, {
+        "attempts": attempts, "effective_time_range": effective_window, "degraded": degraded,
+        **({"fallback_skipped": "search_budget_exhausted"} if fallback_skipped else {}),
+    })

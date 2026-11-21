@@ -16,8 +16,11 @@ docker compose down                     # stop/remove containers; keep local fil
 
 Start again with the existing `.env` using `docker compose up -d`. Rebuild
 Python dependencies after updating source with `docker compose up -d --build`.
-To pull a newer SearxNG image (Compose defaults to `latest`), run
-`docker compose pull searxng` before `docker compose up -d --build`.
+The 0.2.1 Compose files pin the upstream SearXNG image by digest. An existing
+`SEARXNG_IMAGE` in `.env` takes precedence. Review that override, then run
+`docker compose pull searxng` and `docker compose up -d --build`. To confirm
+the running version and image, use the SearXNG `/config` endpoint and
+`docker inspect "$(docker compose ps -q searxng)" --format '{{.Config.Image}} {{.Image}}'`.
 
 **GitHub release ZIP installations:** download a **new** attached versioned ZIP
 from [Releases](https://github.com/alexchwong/webSpell/releases),
@@ -56,6 +59,43 @@ To isolate search-backend startup or configuration problems, check
 SearxNG `/search` endpoint returns a JSON object with a `results` array
 for the `q=test&format=json` query.
 
+## Verify general web search
+
+Run the normal MCP smoke and then the general search cohort. The cohort checks
+known hosts for ordinary unfiltered queries and checks a separate dated query
+for hits and date diagnostics. Run it from the machine that will send production
+queries because upstream behavior can vary with the deployment.
+
+```bash
+bash scripts/smoke_mcp.sh
+bash scripts/smoke_mcp.sh search_general
+SMOKE_CATEGORY=science SMOKE_QUERY="Attention Is All You Need arXiv" bash scripts/smoke_mcp.sh web_search_results
+SMOKE_CATEGORY=it SMOKE_QUERY="git log GitHub git/git" bash scripts/smoke_mcp.sh web_search_results
+SMOKE_CATEGORY=news SMOKE_RECENCY="1 month" SMOKE_QUERY="latest world news" bash scripts/smoke_mcp.sh web_search_results
+```
+
+Set `SMOKE_RECENT_QUERY` to change the dated query in the general cohort. A
+dated probe checks the search and freshness metadata. Review source dates
+separately before relying on freshness. Category probes depend on the enabled
+engines and are optional. To isolate the failure from MCP, inspect SearXNG's
+JSON using the same category, language and filters. This example uses the
+default host port, language and safe-search settings. Add
+`--data-urlencode 'time_range=month'` to compare the filtered response.
+
+```bash
+curl -fsSG --max-time 15 http://127.0.0.1:8888/search \
+  --data-urlencode 'q=Python documentation pathlib Path' \
+  --data-urlencode 'format=json' --data-urlencode 'categories=general' \
+  --data-urlencode 'language=en' --data-urlencode 'safesearch=0' |
+  python3 -c 'import json, sys; d=json.load(sys.stdin); print(len(d["results"]), d.get("unresponsive_engines"))'
+```
+
+If general searches remain inconclusive, check which engines report rate
+limits, CAPTCHA, or parsing errors. Use the SearXNG engine preferences or probe
+one engine at a time from the same machine. Keep healthy general engines
+enabled in `searxng/settings.yml` and re-run the cohort after changes. Repeatedly
+resubmitting the same request during an engine suspension will not restore it.
+
 ## Troubleshooting
 
 | Symptom | First check / action |
@@ -72,7 +112,7 @@ for the `q=test&format=json` query.
 | Browser reports CORS | Check client/proxy support. Opening the port publicly does not solve CORS safely. |
 | `searxng unreachable` | Inspect SearxNG logs, verify JSON search and allow startup time. |
 | Sources but no passages | Fetches may be blocked or require JavaScript; snippets can exist without extracted pages. |
-| Empty search results | Check SearxNG JSON output/logs and possible upstream engine rate limits. |
+| `search_inconclusive` or `search.degraded=true` | Inspect `search.attempts` and SearXNG JSON or logs for engine failures. See the general search checks above. |
 | Blank PDF output | Scanned PDFs require OCR, which is not implemented. Malformed/encrypted PDFs can also fail. |
 | TOML edit ignored | Look for validation errors. A same-size edit with an unchanged timestamp may go unnoticed; save again/restart. |
 | Container client cannot use `localhost` | Join the client's container to the Compose network and use `web-retrieval:8765` or configure a private network path. |

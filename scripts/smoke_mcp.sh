@@ -7,18 +7,20 @@ if [[ $# -gt 1 ]]; then
     tool=invalid
 fi
 case "$tool" in
-    all|web_search_results|web_evidence_passages|web_evidence_passages_urls|web_page_text) ;;
-    *) echo "Usage: bash scripts/smoke_mcp.sh [all|web_search_results|web_evidence_passages|web_evidence_passages_urls|web_page_text]" >&2; exit 2 ;;
+    all|search_general|web_search_results|web_evidence_passages|web_evidence_passages_urls|web_page_text) ;;
+    *) echo "Usage: bash scripts/smoke_mcp.sh [all|search_general|web_search_results|web_evidence_passages|web_evidence_passages_urls|web_page_text]" >&2; exit 2 ;;
 esac
 
 docker compose exec -T web-retrieval python - "$tool" \
     "${SMOKE_QUERY:-IANA example domains}" \
     "${SMOKE_URL:-https://example.com/}" "${SMOKE_CHECK_W3C_PDF:-0}" \
-    "${SMOKE_LOG_RESPONSES:-0}" <<'PY'
+    "${SMOKE_LOG_RESPONSES:-0}" "${SMOKE_CATEGORY:-}" "${SMOKE_RECENCY:-}" \
+    "${SMOKE_RECENT_QUERY:-Python security release notes}" <<'PY'
 import asyncio
 import json
 import os
 import sys
+from urllib.parse import urlsplit
 
 from fastmcp import Client
 
@@ -27,7 +29,13 @@ for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
     os.environ.pop(name, None)
     os.environ.pop(name.lower(), None)
 
-selected, query, url, check_w3c_pdf, log_responses = sys.argv[1:]
+selected, query, url, check_w3c_pdf, log_responses, category, recency, recent_query = sys.argv[1:]
+filters = {key: value for key, value in {"category": category, "recency": recency}.items() if value}
+general_queries = (
+    ("IANA example domains", "iana.org"),
+    ("Python documentation pathlib Path", "docs.python.org"),
+    ("Git documentation git log git-scm", "git-scm.com"),
+)
 w3c_pdf_url = "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"
 expected = ("web_search_results", "web_evidence_passages", "web_page_text")
 
@@ -57,27 +65,61 @@ async def call(client, tool, args, *, label=None):
     return payload
 
 
+async def check_search(client, args, *, label=None, expected_host=None):
+    data = await call(client, "web_search_results", args, label=label)
+    meta = data.get("search", {})
+    sources = data.get("sources", [])
+    require(data.get("status") == "complete" and sources,
+            f"status={data.get('status')} reason={data.get('reason')} "
+            f"attempts={meta.get('attempts')}")
+    require(meta.get("category") == args.get("category", "general"), "wrong search category")
+    require("passages" not in data, "unexpected passages")
+    require(
+        all(source.get("fetch_status") == "not_attempted"
+            and source.get("origin") == "search_snippet"
+            and source.get("source_id") and source.get("url")
+            for source in sources),
+        "unexpected browse provenance",
+    )
+    if expected_host:
+        hosts = [urlsplit(source["url"]).hostname or "" for source in sources]
+        require(any(host == expected_host or host.endswith("." + expected_host) for host in hosts),
+                f"expected {expected_host} among the returned sources")
+    if args.get("recency"):
+        require(meta.get("cutoff_utc") and meta.get("attempts"), "missing time-filter diagnostics")
+        require(all(source.get("date_status") in {"engine_date_in_range", "date_unknown"}
+                    for source in sources), "missing publication-date status")
+    print(f"  {label or 'search'}: {len(sources)} hits, search={json.dumps(meta, ensure_ascii=True)}",
+          flush=True)
+
+
 async def check(client, tool):
-    if tool == "web_search_results":
-        data = await call(client, tool, {"query": query})
-        require(data.get("status") == "complete", f"status={data.get('status')}")
-        require(data.get("sources"), "no search sources")
-        require("passages" not in data, "unexpected passages")
-        require(
-            all(source.get("fetch_status") == "not_attempted"
-                and source.get("origin") == "search_snippet"
-                and source.get("source_id") and source.get("url")
-                for source in data["sources"]),
-            "unexpected browse provenance",
-        )
+    if tool == "search_general":
+        cohort = [(term, {"query": term}, host) for term, host in general_queries]
+        cohort.append(("general search with recency", {"query": recent_query, "recency": "1 month"}, None))
+        failures = []
+        for label, args, host in cohort:
+            try:
+                await asyncio.wait_for(check_search(client, args, label=label, expected_host=host), timeout=20)
+            except (ProbeFailure, asyncio.TimeoutError) as exc:
+                detail = str(exc) if isinstance(exc, ProbeFailure) else "timed out"
+                failures.append(f"{label}: {detail}")
+        require(not failures, " | ".join(failures))
+    elif tool == "web_search_results":
+        await check_search(client, {"query": query, **filters})
     elif tool in {"web_evidence_passages", "web_evidence_passages_urls"}:
         supplied = tool == "web_evidence_passages_urls"
         args = {"query": query, "max_passages": 2}
         if supplied:
             args["urls"] = [url]
+        else:
+            args.update(filters)
         data = await call(client, "web_evidence_passages", args, label=tool)
         require(data.get("mode") == ("supplied_urls" if supplied else "web_search"),
                 "wrong evidence mode")
+        if not supplied:
+            require(data.get("search", {}).get("category") == args.get("category", "general"),
+                    "wrong evidence search category")
         if supplied:
             require("search" not in data and len(data.get("sources", [])) == 1
                     and data["sources"][0].get("url") == url
@@ -123,7 +165,7 @@ async def run():
             checks += ("web_page_text_pdf",)
         for tool in checks if selected == "all" else (selected,):
             try:
-                await asyncio.wait_for(check(client, tool), timeout=60)
+                await asyncio.wait_for(check(client, tool), timeout=90 if tool == "search_general" else 60)
             except Exception as exc:
                 detail = str(exc) if isinstance(exc, ProbeFailure) else type(exc).__name__
                 print(f"FAIL {tool} — {detail}", file=sys.stderr, flush=True)
